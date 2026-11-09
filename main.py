@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import os
 import sys
 
 from aiogram import Bot, Dispatcher
@@ -21,6 +22,37 @@ logging.basicConfig(
     stream=sys.stdout,
 )
 logger = logging.getLogger(__name__)
+
+
+async def start_health_server() -> asyncio.AbstractServer | None:
+    port_raw = os.getenv("PORT")
+    if not port_raw:
+        return None
+    port = int(port_raw)
+
+    async def handle(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        try:
+            await reader.read(1024)
+            body = b"OK"
+            writer.write(
+                b"HTTP/1.1 200 OK\r\n"
+                b"Content-Type: text/plain\r\n"
+                b"Content-Length: " + str(len(body)).encode() + b"\r\n"
+                b"Connection: close\r\n\r\n" + body
+            )
+            await writer.drain()
+        except Exception:
+            pass
+        finally:
+            try:
+                writer.close()
+                await writer.wait_closed()
+            except Exception:
+                pass
+
+    server = await asyncio.start_server(handle, "0.0.0.0", port)
+    logger.info("Health server %s-portda ishga tushdi", port)
+    return server
 
 
 async def main() -> None:
@@ -70,6 +102,7 @@ async def main() -> None:
     except Exception as exc:
         logger.warning("Buyruqlarni o'rnatib bo'lmadi: %s", exc)
 
+    health_server = await start_health_server()
     scheduler_task = asyncio.create_task(penalty_loop(bot))
     try:
         await bot.delete_webhook(drop_pending_updates=True)
@@ -77,6 +110,9 @@ async def main() -> None:
         await dispatcher.start_polling(bot)
     finally:
         scheduler_task.cancel()
+        if health_server is not None:
+            health_server.close()
+            await health_server.wait_closed()
         try:
             await scheduler_task
         except (asyncio.CancelledError, Exception):
