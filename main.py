@@ -1,20 +1,24 @@
+"""Entry point: wires database, bot, middlewares, routers and scheduler."""
+
+from __future__ import annotations
+
 import asyncio
 import logging
-import os
 import sys
 
 from aiogram import Bot, Dispatcher
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
-from aiogram.types import BotCommand
+from aiogram.types import BotCommand, ErrorEvent
 
 from config import ADMIN_IDS, BOT_TOKEN, FSM_DB_PATH
-from db import db
-from handlers import admin, buyer, seller, start, wallet
-from handlers.common import error_handler
+from database.db import db
+from database.fsm import SQLiteStorage
+from handlers import routers
+from health import start_health_server
 from middlewares import ThrottlingMiddleware, UserMiddleware
-from scheduler import penalty_loop
-from sqlite_storage import SQLiteStorage
+from services.i18n import reload_locales
+from services.scheduler import start_scheduler, stop_scheduler
 
 logging.basicConfig(
     level=logging.INFO,
@@ -24,52 +28,25 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
-async def start_health_server() -> asyncio.AbstractServer | None:
-    port_raw = os.getenv("PORT")
-    if not port_raw:
-        return None
-    port = int(port_raw)
-
-    async def handle(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
-        try:
-            await reader.read(1024)
-            body = b"OK"
-            writer.write(
-                b"HTTP/1.1 200 OK\r\n"
-                b"Content-Type: text/plain\r\n"
-                b"Content-Length: " + str(len(body)).encode() + b"\r\n"
-                b"Connection: close\r\n\r\n" + body
-            )
-            await writer.drain()
-        except Exception:
-            pass
-        finally:
-            try:
-                writer.close()
-                await writer.wait_closed()
-            except Exception:
-                pass
-
-    server = await asyncio.start_server(handle, "0.0.0.0", port)
-    logger.info("Health server %s-portda ishga tushdi", port)
-    return server
+async def on_error(event: ErrorEvent) -> bool:
+    logger.exception("Update ishlashida xatolik: %s", event.exception)
+    return True
 
 
 async def main() -> None:
     if not BOT_TOKEN:
         logger.error(
-            "BOT_TOKEN topilmadi. .env faylini ochib, BotFather'dan olingan "
-            "tokenni BOT_TOKEN qatoriga yozing."
+            "BOT_TOKEN topilmadi. .env fayliga BotFather'dan olingan tokenni yozing."
         )
         return
     if not ADMIN_IDS:
         logger.warning(
-            "ADMIN_IDS bo'sh. Admin panel ishlamaydi va to'lovlar tasdiqlanmaydi. "
-            ".env fayliga admin Telegram ID sini yozing."
+            "ADMIN_IDS bo'sh. Admin panel va to'lovlarni tasdiqlash ishlamaydi."
         )
 
+    reload_locales()
     await db.connect()
-    logger.info("Ma'lumotlar bazasi ulandi: %s", db.path)
+    logger.info("Ma'lumotlar bazasi ulandi: %s", db.describe())
 
     storage = SQLiteStorage(FSM_DB_PATH)
     await storage.connect()
@@ -77,46 +54,37 @@ async def main() -> None:
     bot = Bot(BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
     dispatcher = Dispatcher(storage=storage)
 
-    dispatcher.message.middleware(ThrottlingMiddleware())
-    dispatcher.callback_query.middleware(ThrottlingMiddleware())
-    dispatcher.message.middleware(UserMiddleware())
-    dispatcher.callback_query.middleware(UserMiddleware())
+    dispatcher.message.outer_middleware(ThrottlingMiddleware())
+    dispatcher.callback_query.outer_middleware(ThrottlingMiddleware())
+    dispatcher.message.outer_middleware(UserMiddleware())
+    dispatcher.callback_query.outer_middleware(UserMiddleware())
 
-    dispatcher.include_routers(
-        start.router,
-        seller.router,
-        buyer.router,
-        wallet.router,
-        admin.router,
-    )
-    dispatcher.errors.register(error_handler)
+    dispatcher.include_routers(*routers)
+    dispatcher.errors.register(on_error)
 
     try:
         await bot.set_my_commands(
             [
-                BotCommand(command="start", description="Asosiy menyu"),
-                BotCommand(command="cancel", description="Amalni bekor qilish"),
-                BotCommand(command="help", description="Yordam"),
+                BotCommand(command="start", description="Asosiy menyu / Главное меню"),
+                BotCommand(command="cancel", description="Bekor qilish / Отмена"),
+                BotCommand(command="help", description="Yordam / Помощь"),
             ]
         )
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 - commands are non critical
         logger.warning("Buyruqlarni o'rnatib bo'lmadi: %s", exc)
 
     health_server = await start_health_server()
-    scheduler_task = asyncio.create_task(penalty_loop(bot))
+    scheduler_task = start_scheduler(bot)
+
     try:
         await bot.delete_webhook(drop_pending_updates=True)
         logger.info("Bot ishga tushdi")
         await dispatcher.start_polling(bot)
     finally:
-        scheduler_task.cancel()
+        await stop_scheduler(scheduler_task)
         if health_server is not None:
             health_server.close()
             await health_server.wait_closed()
-        try:
-            await scheduler_task
-        except (asyncio.CancelledError, Exception):
-            pass
         await storage.close()
         await db.close()
         await bot.session.close()

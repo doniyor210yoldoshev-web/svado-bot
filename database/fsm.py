@@ -1,3 +1,12 @@
+"""Persistent FSM storage backed by a small SQLite file.
+
+Business data always lives in the main database. FSM state is short-lived and
+kept separately so it survives process restarts without polluting the domain
+schema.
+"""
+
+from __future__ import annotations
+
 import asyncio
 import json
 from collections.abc import Mapping
@@ -8,15 +17,12 @@ import aiosqlite
 from aiogram.fsm.state import State
 from aiogram.fsm.storage.base import BaseStorage, StateType, StorageKey
 
-from utils import utcnow_iso
-
-SCHEMA = """
+_SCHEMA = """
 CREATE TABLE IF NOT EXISTS fsm_states (
     key TEXT PRIMARY KEY,
     state TEXT,
     updated_at TEXT NOT NULL
 );
-
 CREATE TABLE IF NOT EXISTS fsm_data (
     key TEXT PRIMARY KEY,
     data TEXT NOT NULL,
@@ -25,9 +31,13 @@ CREATE TABLE IF NOT EXISTS fsm_data (
 """
 
 
-class SQLiteStorage(BaseStorage):
-    """FSM holatini SQLite'da saqlaydi, restartdan keyin ham yo'qolmaydi."""
+def _now() -> str:
+    from utils import utcnow_iso
 
+    return utcnow_iso()
+
+
+class SQLiteStorage(BaseStorage):
     def __init__(self, path: Path):
         self.path = path
         self._conn: aiosqlite.Connection | None = None
@@ -64,17 +74,16 @@ class SQLiteStorage(BaseStorage):
     async def connect(self) -> None:
         self._conn = await aiosqlite.connect(str(self.path))
         await self._conn.execute("PRAGMA journal_mode=WAL")
-        await self._conn.executescript(SCHEMA)
+        await self._conn.executescript(_SCHEMA)
         await self._conn.commit()
 
     async def set_state(self, key: StorageKey, state: StateType = None) -> None:
-        value = self._state_value(state)
         async with self._lock:
             await self._connection().execute(
                 "INSERT INTO fsm_states (key, state, updated_at) VALUES (?, ?, ?) "
                 "ON CONFLICT(key) DO UPDATE SET state = excluded.state, "
                 "updated_at = excluded.updated_at",
-                (self._key(key), value, utcnow_iso()),
+                (self._key(key), self._state_value(state), _now()),
             )
             await self._connection().commit()
 
@@ -94,7 +103,7 @@ class SQLiteStorage(BaseStorage):
                 "INSERT INTO fsm_data (key, data, updated_at) VALUES (?, ?, ?) "
                 "ON CONFLICT(key) DO UPDATE SET data = excluded.data, "
                 "updated_at = excluded.updated_at",
-                (self._key(key), payload, utcnow_iso()),
+                (self._key(key), payload, _now()),
             )
             await self._connection().commit()
 
@@ -131,7 +140,7 @@ class SQLiteStorage(BaseStorage):
                 "INSERT INTO fsm_data (key, data, updated_at) VALUES (?, ?, ?) "
                 "ON CONFLICT(key) DO UPDATE SET data = excluded.data, "
                 "updated_at = excluded.updated_at",
-                (self._key(key), payload, utcnow_iso()),
+                (self._key(key), payload, _now()),
             )
             await self._connection().commit()
             return current.copy()

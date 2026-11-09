@@ -1,661 +1,722 @@
+"""Admin panel handlers."""
+
+from __future__ import annotations
+
 import asyncio
+import secrets
+from collections.abc import Awaitable, Callable
+from typing import Any
 
-from aiogram import F, Router
+from aiogram import BaseMiddleware, Bot, F, Router
+from aiogram.filters import StateFilter
 from aiogram.fsm.context import FSMContext
-from aiogram.types import CallbackQuery, Message
+from aiogram.types import (
+    CallbackQuery,
+    InlineKeyboardButton,
+    Message,
+    TelegramObject,
+)
+from aiogram.utils.keyboard import InlineKeyboardBuilder
 
-import services
-from keyboards import (
-    admin_menu,
-    admin_users_kb,
-    broadcast_confirm_kb,
-    dispute_review_kb,
-    topup_review_kb,
-    withdrawal_review_kb,
+from config import TEST_INITIAL_BALANCE
+from handlers.helpers import respond
+from keyboards.inline import (
+    admin_menu_keyboard,
+    admin_user_keyboard,
+    back_keyboard,
+    broadcast_keyboard,
+    test_keyboard,
 )
-from notifications import (
-    dispute_text,
-    send_topup_card,
-    withdrawal_text,
-)
+from keyboards.reply import cancel_reply, main_menu_reply
+from services import marketplace, notifications, payment
+from services import users as users_service
+from services.errors import ServiceError
+from services.i18n import t
 from states import AdminFlow
-from utils import (
-    ORDER_STATUS_LABELS,
-    code,
-    esc,
-    fmt_dt,
-    fmt_sum,
-    parse_amount,
-)
+from utils import esc, fmt_dt, fmt_sum, parse_amount
 
 router = Router(name="admin")
 
 
-def _is_admin(db_user) -> bool:
-    return bool(db_user and db_user["is_admin"])
+class AdminMiddleware(BaseMiddleware):
+    async def __call__(
+        self,
+        handler: Callable[[TelegramObject, dict[str, Any]], Awaitable[Any]],
+        event: TelegramObject,
+        data: dict[str, Any],
+    ) -> Any:
+        user = data.get("user")
+        if not user or not user.get("is_admin"):
+            lang = data.get("lang") or "uz"
+            text = t(lang, "admin.only_admin")
+            if isinstance(event, CallbackQuery):
+                await event.answer(text, show_alert=True)
+            elif isinstance(event, Message):
+                await event.answer(text)
+            return None
+        return await handler(event, data)
 
 
-async def _deny(callback: CallbackQuery) -> None:
-    await callback.answer("Ruxsat yo'q", show_alert=True)
+router.callback_query.outer_middleware(AdminMiddleware())
+router.message.outer_middleware(AdminMiddleware())
 
 
-@router.callback_query(F.data == "admin:menu")
-async def cb_admin_menu(callback: CallbackQuery, state: FSMContext, db_user):
-    if not _is_admin(db_user):
-        await _deny(callback)
-        return
-    await state.clear()
+def _btn(text: str, data: str) -> InlineKeyboardButton:
+    return InlineKeyboardButton(text=text, callback_data=data)
+
+
+def _tail_id(data: str | None) -> int | None:
+    try:
+        return int((data or "").rsplit(":", 1)[1])
+    except (ValueError, IndexError):
+        return None
+
+
+def _page(data: str | None) -> int:
+    try:
+        return max(1, int((data or "").rsplit(":", 1)[1]))
+    except (ValueError, IndexError):
+        return 1
+
+
+def _pager(prefix: str, page: int, total: int, lang: str) -> list[InlineKeyboardButton]:
+    row: list[InlineKeyboardButton] = []
+    if page > 1:
+        row.append(_btn(t(lang, "common.prev"), f"{prefix}:{page - 1}"))
+    row.append(_btn(t(lang, "common.page", page=page, total=total), "noop"))
+    if page < total:
+        row.append(_btn(t(lang, "common.next"), f"{prefix}:{page + 1}"))
+    return row
+
+
+@router.callback_query(F.data == "admin:home")
+async def home(callback: CallbackQuery, lang: str) -> None:
     await callback.answer()
-    await callback.message.answer(
-        "🛠 <b>Admin panel</b>\n\nKerakli bo'limni tanlang:",
-        reply_markup=admin_menu(),
-    )
+    await respond(callback, t(lang, "admin.title"), admin_menu_keyboard(lang))
 
 
 @router.callback_query(F.data == "admin:stats")
-async def cb_stats(callback: CallbackQuery, db_user):
-    if not _is_admin(db_user):
-        await _deny(callback)
-        return
-    stats = await services.admin_stats()
-    await callback.answer()
-    await callback.message.answer(
-        "📊 <b>Platforma statistikasi</b>\n\n"
-        f"👥 Foydalanuvchilar: <b>{stats['users']}</b>\n"
-        f"🧑‍💼 Sotuvchilar: <b>{stats['sellers']}</b>\n"
-        f"📦 Sotuvdagi akkauntlar: <b>{stats['active_accounts']}</b>\n"
-        f"✅ Sotilgan akkauntlar: <b>{stats['sold_accounts']}</b>\n\n"
-        f"⏳ Tekshirilayotgan buyurtmalar: <b>{stats['checking']}</b>\n"
-        f"🏁 Yakunlangan savdolar: <b>{stats['completed']}</b>\n"
-        f"⚠️ Faol shikoyatlar: <b>{stats['disputed']}</b>\n\n"
-        f"💵 Umumiy savdo hajmi: <b>{fmt_sum(stats['gmv'])}</b>\n"
-        f"🏦 Bot komissiyasi: <b>{fmt_sum(stats['commission'])}</b>\n\n"
-        f"💳 Kutilayotgan to'lovlar: <b>{stats['pending_topups']}</b>\n"
-        f"💸 Kutilayotgan pul yechish: <b>{stats['pending_withdrawals']}</b>",
-        reply_markup=admin_menu(),
+async def stats(callback: CallbackQuery, lang: str) -> None:
+    data = await marketplace.admin_stats()
+    text = t(
+        lang,
+        "admin.stats",
+        users=data["users"],
+        sellers=data["sellers"],
+        active=data["active"],
+        sold=data["sold"],
+        checking=data["checking"],
+        completed=data["completed"],
+        disputed=data["disputed"],
+        gmv=fmt_sum(data["gmv"]),
+        commission=fmt_sum(data["commission"]),
+        topups=data["topups"],
+        withdrawals=data["withdrawals"],
     )
-
-
-@router.callback_query(F.data == "admin:audit")
-async def cb_audit(callback: CallbackQuery, db_user):
-    if not _is_admin(db_user):
-        await _deny(callback)
-        return
-    logs = await services.list_audit_logs(limit=20)
     await callback.answer()
-    if not logs:
-        await callback.message.answer(
-            "📝 Audit jurnal hozircha bo'sh.", reply_markup=admin_menu()
-        )
-        return
-
-    lines = ["📝 <b>Oxirgi admin amallari</b>\n"]
-    for entry in logs:
-        actor = entry["actor_tg"] if entry["actor_tg"] else "-"
-        details = (entry["details"] or "").strip()
-        lines.append(
-            f"• <b>{esc(entry['action'])}</b> | {code(actor)}\n"
-            f"  {esc(details[:200])}\n"
-            f"  {fmt_dt(entry['created_at'])}"
-        )
-    await callback.message.answer("\n".join(lines), reply_markup=admin_menu())
+    await respond(callback, text, back_keyboard(lang, "admin:home"))
 
 
-@router.callback_query(F.data == "admin:topups")
-async def cb_topups(callback: CallbackQuery, db_user):
-    if not _is_admin(db_user):
-        await _deny(callback)
+async def _render_payments(callback: CallbackQuery, lang: str, page: int) -> None:
+    rows = await payment.list_pending_topups(limit=200)
+    if not rows:
+        await respond(callback, t(lang, "admin.no_pending"), back_keyboard(lang, "admin:home"))
         return
-    topups = await services.list_pending_topups(limit=10)
-    await callback.answer()
-    if not topups:
-        await callback.message.answer(
-            "✅ Kutilayotgan to'lovlar yo'q.", reply_markup=admin_menu()
-        )
-        return
-    await callback.message.answer(f"💳 <b>Kutilayotgan to'lovlar</b> ({len(topups)} ta)")
-    for topup in topups:
-        await send_topup_card(
-            callback.bot,
-            callback.message.chat.id,
-            topup,
-            topup_review_kb(topup["id"]),
-        )
-
-
-@router.callback_query(F.data == "admin:withdrawals")
-async def cb_withdrawals(callback: CallbackQuery, db_user):
-    if not _is_admin(db_user):
-        await _deny(callback)
-        return
-    withdrawals = await services.list_pending_withdrawals(limit=10)
-    await callback.answer()
-    if not withdrawals:
-        await callback.message.answer(
-            "✅ Kutilayotgan pul yechish so'rovlari yo'q.", reply_markup=admin_menu()
-        )
-        return
-    await callback.message.answer(
-        f"💸 <b>Kutilayotgan pul yechish so'rovlari</b> ({len(withdrawals)} ta)"
+    page = min(max(1, page), len(rows))
+    row = rows[page - 1]
+    text = t(
+        lang,
+        "admin.topup_card",
+        name=esc(row["user_name"]) or "—",
+        tg=row["user_tg"],
+        username=esc(row.get("username")) or "—",
+        amount=fmt_sum(row["amount"]),
+        receipt_type=row["receipt_type"],
+        date=fmt_dt(row["created_at"]),
+        id=row["id"],
     )
-    for withdrawal in withdrawals:
-        await callback.message.answer(
-            withdrawal_text(withdrawal),
-            reply_markup=withdrawal_review_kb(withdrawal["id"]),
-        )
-
-
-@router.callback_query(F.data == "admin:disputes")
-async def cb_disputes(callback: CallbackQuery, db_user):
-    if not _is_admin(db_user):
-        await _deny(callback)
-        return
-    disputes = await services.list_pending_disputes(limit=10)
-    await callback.answer()
-    if not disputes:
-        await callback.message.answer(
-            "✅ Faol shikoyatlar yo'q.", reply_markup=admin_menu()
-        )
-        return
-    await callback.message.answer(f"⚠️ <b>Faol shikoyatlar</b> ({len(disputes)} ta)")
-    for dispute in disputes:
-        await callback.message.answer(
-            dispute_text(dispute),
-            reply_markup=dispute_review_kb(dispute["order_id"]),
-        )
-
-
-@router.callback_query(F.data == "admin:sales")
-async def cb_sales(callback: CallbackQuery, db_user):
-    if not _is_admin(db_user):
-        await _deny(callback)
-        return
-    sales = await services.list_recent_sales(limit=20)
-    await callback.answer()
-    if not sales:
-        await callback.message.answer(
-            "🧾 Hozircha savdolar yo'q.", reply_markup=admin_menu()
-        )
-        return
-
-    lines = ["🧾 <b>Oxirgi savdolar</b>\n"]
-    for order in sales:
-        status = ORDER_STATUS_LABELS.get(order["status"], order["status"])
-        total = order["price"] + order["penalty"]
-        lines.append(
-            f"• <b>#{order['id']}</b> | {status} | {fmt_sum(total)}\n"
-            f"  Sotuvchi: {esc(order['seller_name'])} ({code(order['seller_code'])})\n"
-            f"  Xaridor: {esc(order['buyer_name'])} | {fmt_dt(order['created_at'])}"
-        )
-    await callback.message.answer("\n".join(lines), reply_markup=admin_menu())
-
-
-@router.callback_query(F.data == "admin:users")
-async def cb_users(callback: CallbackQuery, state: FSMContext, db_user):
-    if not _is_admin(db_user):
-        await _deny(callback)
-        return
-    await state.set_state(AdminFlow.user_query)
-    await callback.answer()
-    await callback.message.answer(
-        "👤 <b>Foydalanuvchini qidirish</b>\n\n"
-        "Telegram ID, foydalanuvchi ID, sotuvchi kodi yoki username yuboring:",
-        reply_markup=admin_menu(),
+    kb = InlineKeyboardBuilder()
+    kb.row(
+        _btn(t(lang, "admin.approve"), f"admin:topup:ok:{row['id']}"),
+        _btn(t(lang, "admin.reject"), f"admin:topup:no:{row['id']}"),
     )
+    kb.row(*_pager("admin:payments", page, len(rows), lang))
+    kb.row(_btn(t(lang, "admin.back"), "admin:home"))
+    await respond(callback, text, kb.as_markup())
 
 
-@router.message(AdminFlow.user_query, F.text)
-async def user_query(message: Message, state: FSMContext, db_user):
-    if not _is_admin(db_user):
-        return
-    user = await services.search_user(message.text)
-    if user is None:
-        await message.answer("❌ Foydalanuvchi topilmadi.")
-        return
-
-    await state.clear()
-    role = "Sotuvchi" if user["is_seller"] else "Xaridor"
-    if user["is_admin"]:
-        role += " + Admin"
-    text = (
-        "👤 <b>Foydalanuvchi</b>\n\n"
-        f"Baza ID: {code(user['id'])}\n"
-        f"Telegram ID: {code(user['tg_id'])}\n"
-        f"Ism: {esc(user['full_name'])}\n"
-        f"Username: @{esc(user['username'] or 'yo`q')}\n"
-        f"Telefon: {esc(user['phone'] or '-')}\n"
-        f"Rol: {role}\n"
-        f"Sotuvchi kodi: {code(user['seller_code'] or '-')}\n"
-        f"Balans: <b>{fmt_sum(user['balance'])}</b>\n"
-        f"Holat: {'🚫 Bloklangan' if user['is_blocked'] else '✅ Faol'}\n"
-        f"Ro'yxatdan o'tgan: {fmt_dt(user['created_at'])}"
-    )
-    await message.answer(text, reply_markup=admin_users_kb(user))
+@router.callback_query(F.data.startswith("admin:payments:"))
+async def payments(callback: CallbackQuery, lang: str) -> None:
+    await callback.answer()
+    await _render_payments(callback, lang, _page(callback.data))
 
 
-@router.callback_query(F.data.startswith("admin:bal:"))
-async def cb_balance_adjust(callback: CallbackQuery, state: FSMContext, db_user):
-    if not _is_admin(db_user):
-        await _deny(callback)
+@router.callback_query(F.data.startswith("admin:topup:ok:"))
+async def topup_approve(
+    callback: CallbackQuery, user: dict, lang: str, bot: Bot
+) -> None:
+    topup_id = _tail_id(callback.data)
+    if topup_id is None:
+        await callback.answer(t(lang, "common.invalid_data"), show_alert=True)
         return
     try:
-        user_id = int(callback.data.split(":")[2])
-    except (ValueError, IndexError):
-        await callback.answer("Noto'g'ri ma'lumot", show_alert=True)
-        return
-
-    user = await services.get_user(user_id)
-    if user is None:
-        await callback.answer("Foydalanuvchi topilmadi", show_alert=True)
-        return
-
-    await state.set_state(AdminFlow.balance_amount)
-    await state.update_data(balance_user_id=user_id)
-    await callback.answer()
-    await callback.message.answer(
-        "💰 <b>Balansni o'zgartirish</b>\n\n"
-        f"Foydalanuvchi: {esc(user['full_name'])} ({code(user['tg_id'])})\n"
-        f"Joriy balans: <b>{fmt_sum(user['balance'])}</b>\n\n"
-        "Summani kiriting. Qo'shish uchun oddiy raqam, ayirish uchun oldiga "
-        "minus qo'ying.\nMasalan: <code>50000</code> yoki <code>-25000</code>",
-        reply_markup=admin_menu(),
-    )
-
-
-@router.message(AdminFlow.balance_amount, F.text)
-async def balance_amount(message: Message, state: FSMContext, db_user):
-    if not _is_admin(db_user):
-        return
-    raw = message.text.strip()
-    amount = parse_amount(raw)
-    if amount is None or amount == 0:
-        await message.answer("❌ Summa noto'g'ri. Masalan: <code>50000</code>")
-        return
-    if raw.startswith("-"):
-        amount = -amount
-
-    await state.update_data(balance_amount=amount)
-    await state.set_state(AdminFlow.balance_note)
-    await message.answer(
-        f"Summa: <b>{fmt_sum(amount)}</b>\n\n"
-        "Izoh yozing yoki <code>-</code> yuboring.",
-    )
-
-
-@router.message(AdminFlow.balance_note, F.text)
-async def balance_note(message: Message, state: FSMContext, db_user):
-    if not _is_admin(db_user):
-        return
-    data = await state.get_data()
-    user_id = int(data.get("balance_user_id", 0))
-    amount = int(data.get("balance_amount", 0))
-    if not user_id or not amount:
-        await state.clear()
-        await message.answer("❌ Ma'lumotlar eskirgan.", reply_markup=admin_menu())
-        return
-
-    note = message.text.strip()
-    if note == "-":
-        note = ""
-    try:
-        new_balance = await services.adjust_balance(
-            user_id, amount, db_user["tg_id"], note
-        )
-    except services.ServiceError as exc:
-        await state.clear()
-        await message.answer(f"❌ {esc(exc)}", reply_markup=admin_menu())
-        return
-
-    await state.clear()
-    await message.answer(
-        "✅ <b>Balans o'zgartirildi</b>\n\n"
-        f"O'zgarish: <b>{fmt_sum(amount)}</b>\n"
-        f"Yangi balans: <b>{fmt_sum(new_balance)}</b>",
-        reply_markup=admin_menu(),
-    )
-
-
-@router.message(AdminFlow.balance_amount)
-async def balance_amount_wrong(message: Message, db_user):
-    if not _is_admin(db_user):
-        return
-    await message.answer("💰 Iltimos, summani faqat raqam bilan yuboring.")
-
-
-@router.message(AdminFlow.balance_note)
-async def balance_note_wrong(message: Message, db_user):
-    if not _is_admin(db_user):
-        return
-    await message.answer("📝 Iltimos, izohni matn ko'rinishida yuboring yoki <code>-</code>.")
-
-
-@router.callback_query(F.data.startswith("admin:block:"))
-async def cb_block(callback: CallbackQuery, db_user):
-    if not _is_admin(db_user):
-        await _deny(callback)
-        return
-    try:
-        user_id = int(callback.data.split(":")[2])
-    except (ValueError, IndexError):
-        await callback.answer("Noto'g'ri ma'lumot", show_alert=True)
-        return
-    user = await services.get_user(user_id)
-    if user is None:
-        await callback.answer("Foydalanuvchi topilmadi", show_alert=True)
-        return
-    await services.set_blocked(user_id, True)
-    await services.log_audit(
-        db_user["tg_id"], "user_blocked", f"user={user_id} tg={user['tg_id']}"
-    )
-    await callback.answer("Bloklandi")
-    try:
-        await callback.message.edit_reply_markup(reply_markup=None)
-    except Exception:
-        pass
-    await callback.message.answer(f"🚫 Foydalanuvchi bloklandi: {code(user['tg_id'])}")
-
-
-@router.callback_query(F.data.startswith("admin:unblock:"))
-async def cb_unblock(callback: CallbackQuery, db_user):
-    if not _is_admin(db_user):
-        await _deny(callback)
-        return
-    try:
-        user_id = int(callback.data.split(":")[2])
-    except (ValueError, IndexError):
-        await callback.answer("Noto'g'ri ma'lumot", show_alert=True)
-        return
-    user = await services.get_user(user_id)
-    if user is None:
-        await callback.answer("Foydalanuvchi topilmadi", show_alert=True)
-        return
-    await services.set_blocked(user_id, False)
-    await services.log_audit(
-        db_user["tg_id"], "user_unblocked", f"user={user_id} tg={user['tg_id']}"
-    )
-    await callback.answer("Blokdan chiqarildi")
-    try:
-        await callback.message.edit_reply_markup(reply_markup=None)
-    except Exception:
-        pass
-    await callback.message.answer(
-        f"✅ Foydalanuvchi blokdan chiqarildi: {code(user['tg_id'])}"
-    )
-
-
-@router.callback_query(F.data == "admin:broadcast")
-async def cb_broadcast(callback: CallbackQuery, state: FSMContext, db_user):
-    if not _is_admin(db_user):
-        await _deny(callback)
-        return
-    await state.set_state(AdminFlow.broadcast_text)
-    await callback.answer()
-    await callback.message.answer(
-        "📢 <b>Ommaviy xabar</b>\n\n"
-        "Barcha faol foydalanuvchilarga yuboriladigan xabarni kiriting.\n"
-        "Xabar oddiy matn sifatida yuboriladi.",
-        reply_markup=admin_menu(),
-    )
-
-
-@router.message(AdminFlow.broadcast_text, F.text)
-async def broadcast_text(message: Message, state: FSMContext, db_user):
-    if not _is_admin(db_user):
-        return
-    text = message.text.strip()
-    if len(text) < 2:
-        await message.answer("❌ Xabar juda qisqa.")
-        return
-    await state.update_data(broadcast_text=text)
-    await state.set_state(AdminFlow.broadcast_confirm)
-    await message.answer(
-        "📢 <b>Xabar ko'rinishi</b>\n\n"
-        f"{esc(text)}\n\n"
-        "Barcha faol foydalanuvchilarga yuborilsinmi?",
-        reply_markup=broadcast_confirm_kb(),
-    )
-
-
-@router.callback_query(F.data == "admin:bcast:go")
-async def broadcast_go(callback: CallbackQuery, state: FSMContext, db_user):
-    if not _is_admin(db_user):
-        await _deny(callback)
-        return
-    data = await state.get_data()
-    text = data.get("broadcast_text")
-    if not text:
-        await state.clear()
-        await callback.answer("Xabar topilmadi", show_alert=True)
-        return
-
-    await state.clear()
-    await callback.answer("Yuborilmoqda...")
-    await services.log_audit(db_user["tg_id"], "broadcast", text[:200])
-    recipients = await services.broadcast_recipients()
-    sent = 0
-    failed = 0
-    for row in recipients:
-        try:
-            await callback.bot.send_message(row["tg_id"], text, parse_mode=None)
-            sent += 1
-        except Exception:
-            failed += 1
-        await asyncio.sleep(0.05)
-    await callback.message.answer(
-        "📢 <b>Xabar yuborildi</b>\n\n"
-        f"✅ Yetkazildi: {sent}\n"
-        f"❌ Xatolik: {failed}",
-        reply_markup=admin_menu(),
-    )
-
-
-@router.callback_query(F.data.startswith("admin:topup:"))
-async def cb_topup_review(callback: CallbackQuery, db_user):
-    if not _is_admin(db_user):
-        await _deny(callback)
-        return
-    parts = callback.data.split(":")
-    try:
-        action = parts[2]
-        topup_id = int(parts[3])
-    except (ValueError, IndexError):
-        await callback.answer("Noto'g'ri ma'lumot", show_alert=True)
-        return
-
-    try:
-        result = await services.review_topup(
-            topup_id, action == "approve", db_user["tg_id"]
-        )
-    except services.ServiceError as exc:
+        info = await payment.approve_topup(topup_id, user["tg_id"])
+    except ServiceError as exc:
         await callback.answer(str(exc), show_alert=True)
         return
-
-    await services.log_audit(
-        db_user["tg_id"],
-        "topup_approved" if result["approved"] else "topup_rejected",
-        f"topup={topup_id} amount={result['amount']}",
-    )
-    await callback.answer("Tasdiqlandi" if result["approved"] else "Rad etildi")
-    try:
-        await callback.message.edit_reply_markup(reply_markup=None)
-    except Exception:
-        pass
-
-    if result["approved"]:
-        user_text = (
-            "✅ <b>Balans to'ldirildi!</b>\n\n"
-            f"Summa: <b>{fmt_sum(result['amount'])}</b>\n"
-            "Mablag' hamyoningizga qo'shildi."
-        )
-    else:
-        user_text = (
-            "❌ <b>To'lov rad etildi</b>\n\n"
-            f"Summa: {fmt_sum(result['amount'])}\n"
-            "Chek tekshiruvdan o'tmadi. Admin bilan bog'laning."
-        )
-    if result["user_tg"]:
-        try:
-            await callback.bot.send_message(result["user_tg"], user_text)
-        except Exception:
-            pass
+    await notifications.topup_reviewed(bot, info, True)
+    await marketplace.log_audit(user["tg_id"], "topup.approve", f"#{topup_id}")
+    await callback.answer(t(lang, "admin.topup_ok"))
+    await _render_payments(callback, lang, 1)
 
 
-@router.callback_query(F.data.startswith("admin:wd:"))
-async def cb_withdrawal_review(callback: CallbackQuery, db_user):
-    if not _is_admin(db_user):
-        await _deny(callback)
+@router.callback_query(F.data.startswith("admin:topup:no:"))
+async def topup_reject(
+    callback: CallbackQuery, user: dict, lang: str, bot: Bot
+) -> None:
+    topup_id = _tail_id(callback.data)
+    if topup_id is None:
+        await callback.answer(t(lang, "common.invalid_data"), show_alert=True)
         return
-    parts = callback.data.split(":")
     try:
-        action = parts[2]
-        withdrawal_id = int(parts[3])
-    except (ValueError, IndexError):
-        await callback.answer("Noto'g'ri ma'lumot", show_alert=True)
-        return
-
-    try:
-        result = await services.review_withdrawal(
-            withdrawal_id, action == "approve", db_user["tg_id"]
-        )
-    except services.ServiceError as exc:
+        info = await payment.reject_topup(topup_id, user["tg_id"])
+    except ServiceError as exc:
         await callback.answer(str(exc), show_alert=True)
         return
+    await notifications.topup_reviewed(bot, info, False)
+    await marketplace.log_audit(user["tg_id"], "topup.reject", f"#{topup_id}")
+    await callback.answer(t(lang, "admin.topup_no"))
+    await _render_payments(callback, lang, 1)
 
-    await services.log_audit(
-        db_user["tg_id"],
-        "withdrawal_approved" if result["approved"] else "withdrawal_rejected",
-        f"withdrawal={withdrawal_id} amount={result['amount']}",
+
+async def _render_withdrawals(callback: CallbackQuery, lang: str, page: int) -> None:
+    rows = await payment.list_pending_withdrawals(limit=200)
+    if not rows:
+        await respond(
+            callback, t(lang, "admin.no_pending"), back_keyboard(lang, "admin:home")
+        )
+        return
+    page = min(max(1, page), len(rows))
+    row = rows[page - 1]
+    text = t(
+        lang,
+        "admin.withdrawal_card",
+        name=esc(row["user_name"]) or "—",
+        tg=row["user_tg"],
+        code=esc(row.get("seller_code")) or "—",
+        amount=fmt_sum(row["amount"]),
+        card=row["card_number"],
+        date=fmt_dt(row["created_at"]),
+        id=row["id"],
     )
-    await callback.answer("Tasdiqlandi" if result["approved"] else "Rad etildi")
-    try:
-        await callback.message.edit_reply_markup(reply_markup=None)
-    except Exception:
-        pass
+    kb = InlineKeyboardBuilder()
+    kb.row(
+        _btn(t(lang, "admin.paid"), f"admin:wd:ok:{row['id']}"),
+        _btn(t(lang, "admin.reject"), f"admin:wd:no:{row['id']}"),
+    )
+    kb.row(*_pager("admin:withdrawals", page, len(rows), lang))
+    kb.row(_btn(t(lang, "admin.back"), "admin:home"))
+    await respond(callback, text, kb.as_markup())
 
-    if result["approved"]:
-        user_text = (
-            "✅ <b>Pul yechish tasdiqlandi</b>\n\n"
-            f"Summa: <b>{fmt_sum(result['amount'])}</b>\n"
-            "Mablag' kartangizga o'tkazildi."
+
+@router.callback_query(F.data.startswith("admin:withdrawals:"))
+async def withdrawals(callback: CallbackQuery, lang: str) -> None:
+    await callback.answer()
+    await _render_withdrawals(callback, lang, _page(callback.data))
+
+
+@router.callback_query(F.data.startswith("admin:wd:ok:"))
+async def withdrawal_approve(
+    callback: CallbackQuery, user: dict, lang: str, bot: Bot
+) -> None:
+    withdrawal_id = _tail_id(callback.data)
+    if withdrawal_id is None:
+        await callback.answer(t(lang, "common.invalid_data"), show_alert=True)
+        return
+    try:
+        info = await payment.approve_withdrawal(withdrawal_id, user["tg_id"])
+    except ServiceError as exc:
+        await callback.answer(str(exc), show_alert=True)
+        return
+    await notifications.withdrawal_reviewed(bot, info, True)
+    await marketplace.log_audit(user["tg_id"], "withdrawal.paid", f"#{withdrawal_id}")
+    await callback.answer(t(lang, "admin.withdrawal_ok"))
+    await _render_withdrawals(callback, lang, 1)
+
+
+@router.callback_query(F.data.startswith("admin:wd:no:"))
+async def withdrawal_reject(
+    callback: CallbackQuery, user: dict, lang: str, bot: Bot
+) -> None:
+    withdrawal_id = _tail_id(callback.data)
+    if withdrawal_id is None:
+        await callback.answer(t(lang, "common.invalid_data"), show_alert=True)
+        return
+    try:
+        info = await payment.reject_withdrawal(withdrawal_id, user["tg_id"])
+    except ServiceError as exc:
+        await callback.answer(str(exc), show_alert=True)
+        return
+    await notifications.withdrawal_reviewed(bot, info, False)
+    await marketplace.log_audit(user["tg_id"], "withdrawal.reject", f"#{withdrawal_id}")
+    await callback.answer(t(lang, "admin.withdrawal_no"))
+    await _render_withdrawals(callback, lang, 1)
+
+
+async def _render_disputes(callback: CallbackQuery, lang: str, page: int) -> None:
+    rows = await marketplace.list_pending_disputes(limit=200)
+    if not rows:
+        await respond(
+            callback, t(lang, "admin.no_disputes"), back_keyboard(lang, "admin:home")
         )
-    else:
-        user_text = (
-            "❌ <b>Pul yechish rad etildi</b>\n\n"
-            f"Summa: {fmt_sum(result['amount'])}\n"
-            "Mablag' balansingizga qaytarildi."
-        )
-    if result["user_tg"]:
-        try:
-            await callback.bot.send_message(result["user_tg"], user_text)
-        except Exception:
-            pass
+        return
+    page = min(max(1, page), len(rows))
+    row = rows[page - 1]
+    text = t(
+        lang,
+        "admin.dispute_card",
+        order=row["order_id"],
+        account=row["account_id"],
+        buyer=esc(row["buyer_name"]) or "—",
+        buyer_tg=row["buyer_tg"],
+        seller=esc(row["seller_name"]) or "—",
+        seller_tg=row["seller_tg"],
+        price=fmt_sum(row["price"]),
+        penalty=fmt_sum(row["penalty"]),
+        reason=esc(row["reason"]),
+        date=fmt_dt(row["created_at"]),
+    )
+    kb = InlineKeyboardBuilder()
+    kb.row(
+        _btn(t(lang, "admin.refund"), f"admin:disp:refund:{row['order_id']}"),
+        _btn(t(lang, "admin.release"), f"admin:disp:release:{row['order_id']}"),
+    )
+    kb.row(_btn(t(lang, "admin.check_creds"), f"admin:disp:creds:{row['order_id']}"))
+    kb.row(*_pager("admin:disputes", page, len(rows), lang))
+    kb.row(_btn(t(lang, "admin.back"), "admin:home"))
+    await respond(callback, text, kb.as_markup())
+
+
+@router.callback_query(F.data.startswith("admin:disputes:"))
+async def disputes(callback: CallbackQuery, lang: str) -> None:
+    await callback.answer()
+    await _render_disputes(callback, lang, _page(callback.data))
 
 
 @router.callback_query(F.data.startswith("admin:disp:creds:"))
-async def cb_dispute_credentials(callback: CallbackQuery, db_user):
-    if not _is_admin(db_user):
-        await _deny(callback)
+async def dispute_creds(callback: CallbackQuery, lang: str) -> None:
+    order_id = _tail_id(callback.data)
+    if order_id is None:
+        await callback.answer(t(lang, "common.invalid_data"), show_alert=True)
         return
     try:
-        order_id = int(callback.data.split(":")[3])
-    except (ValueError, IndexError):
-        await callback.answer("Noto'g'ri ma'lumot", show_alert=True)
-        return
-
-    try:
-        login, password = await services.get_credentials_admin(order_id)
-    except services.ServiceError as exc:
+        login, password = await marketplace.get_credentials_admin(order_id)
+    except ServiceError as exc:
         await callback.answer(str(exc), show_alert=True)
         return
-
+    if callback.message is not None:
+        await callback.message.answer(
+            t(
+                lang,
+                "admin.dispute_creds",
+                order=order_id,
+                login=esc(login),
+                password=esc(password),
+            )
+        )
     await callback.answer()
-    await callback.message.answer(
-        "🔑 <b>Shikoyat bo'yicha akkaunt ma'lumotlari</b>\n\n"
-        f"Buyurtma: <b>#{order_id}</b>\n"
-        f"Login: {code(login)}\n"
-        f"Parol: {code(password)}\n\n"
-        "⚠️ Bu ma'lumot faqat admin tekshiruvi uchun.",
-        protect_content=True,
-    )
-    await services.log_audit(
-        db_user["tg_id"], "dispute_credentials_view", f"order={order_id}"
-    )
 
 
-@router.callback_query(F.data.startswith("admin:disp:"))
-async def cb_dispute_review(callback: CallbackQuery, db_user):
-    if not _is_admin(db_user):
-        await _deny(callback)
+@router.callback_query(F.data.startswith("admin:disp:refund:"))
+@router.callback_query(F.data.startswith("admin:disp:release:"))
+async def dispute_resolve(
+    callback: CallbackQuery, user: dict, lang: str, bot: Bot
+) -> None:
+    parts = (callback.data or "").split(":")
+    if len(parts) != 4:
+        await callback.answer(t(lang, "common.invalid_data"), show_alert=True)
         return
-    parts = callback.data.split(":")
+    action = parts[2]
     try:
-        action = parts[2]
         order_id = int(parts[3])
-    except (ValueError, IndexError):
-        await callback.answer("Noto'g'ri ma'lumot", show_alert=True)
+    except ValueError:
+        await callback.answer(t(lang, "common.invalid_data"), show_alert=True)
         return
-
     try:
-        result = await services.resolve_dispute(order_id, action, db_user["tg_id"])
-    except services.ServiceError as exc:
+        info = await marketplace.resolve_dispute(order_id, action, user["tg_id"])
+    except ServiceError as exc:
         await callback.answer(str(exc), show_alert=True)
         return
-
-    await services.log_audit(
-        db_user["tg_id"], f"dispute_{action}", f"order={order_id}"
-    )
-    await callback.answer("Hal qilindi")
-    try:
-        await callback.message.edit_reply_markup(reply_markup=None)
-    except Exception:
-        pass
-
-    if result["action"] == "refund":
-        await callback.message.answer(
-            f"↩️ Buyurtma #{order_id}: pul xaridorga qaytarildi "
-            f"({fmt_sum(result['total'])})."
+    await notifications.dispute_resolved(bot, info)
+    await marketplace.log_audit(user["tg_id"], f"dispute.{action}", f"#{order_id}")
+    if action == "refund":
+        message = t(
+            lang,
+            "admin.dispute_refunded",
+            order=order_id,
+            amount=fmt_sum(info["total"]),
         )
-        if result["buyer_tg"]:
-            try:
-                await callback.bot.send_message(
-                    result["buyer_tg"],
-                    "↩️ <b>Shikoyat hal qilindi</b>\n\n"
-                    f"Buyurtma: <b>#{order_id}</b>\n"
-                    f"Balansingizga qaytarildi: <b>{fmt_sum(result['total'])}</b>",
-                )
-            except Exception:
-                pass
-        if result["seller_tg"]:
-            try:
-                await callback.bot.send_message(
-                    result["seller_tg"],
-                    "⚠️ <b>Shikoyat natijasi</b>\n\n"
-                    f"Buyurtma: <b>#{order_id}</b>\n"
-                    "Mablag' xaridorga qaytarildi. Akkaunt yana sotuvga qaytarildi.",
-                )
-            except Exception:
-                pass
     else:
-        await callback.message.answer(
-            f"💰 Buyurtma #{order_id}: mablag' sotuvchiga o'tkazildi."
+        message = t(lang, "admin.dispute_released", order=order_id)
+    await callback.answer(message)
+    await _render_disputes(callback, lang, 1)
+
+
+@router.callback_query(F.data == "admin:sales")
+async def sales(callback: CallbackQuery, lang: str) -> None:
+    orders = await marketplace.list_recent_sales(30)
+    if not orders:
+        await callback.answer()
+        await respond(callback, t(lang, "admin.no_sales"), back_keyboard(lang, "admin:home"))
+        return
+    lines = [
+        f"#{order['id']} | {t(lang, 'order.status.' + order['status'])} | "
+        f"{fmt_sum(int(order['price']) + int(order['penalty']))} | "
+        f"{esc(order['seller_name'])} -> {esc(order['buyer_name'])}"
+        for order in orders
+    ]
+    text = t(lang, "admin.sales_btn") + "\n\n" + "\n".join(lines)
+    await callback.answer()
+    await respond(callback, text, back_keyboard(lang, "admin:home"))
+
+
+@router.callback_query(F.data == "admin:accounts")
+async def accounts(callback: CallbackQuery, lang: str) -> None:
+    rows = await marketplace.admin_list_accounts(30)
+    if not rows:
+        await callback.answer()
+        await respond(
+            callback, t(lang, "admin.accounts_empty"), back_keyboard(lang, "admin:home")
         )
-        if result["seller_tg"]:
-            try:
-                await callback.bot.send_message(
-                    result["seller_tg"],
-                    "✅ <b>Shikoyat hal qilindi</b>\n\n"
-                    f"Buyurtma: <b>#{order_id}</b>\n"
-                    f"Balansingizga qo'shildi: <b>{fmt_sum(result['seller_share'])}</b>",
-                )
-            except Exception:
-                pass
-        if result["buyer_tg"]:
-            try:
-                await callback.bot.send_message(
-                    result["buyer_tg"],
-                    "⚠️ <b>Shikoyat natijasi</b>\n\n"
-                    f"Buyurtma: <b>#{order_id}</b>\n"
-                    "Admin savdoni sotuvchi foydasiga hal qildi.",
-                )
-            except Exception:
-                pass
+        return
+    lines = [
+        t(
+            lang,
+            "admin.accounts_line",
+            id=row["id"],
+            status=t(lang, "account.status." + row["status"]),
+            price=fmt_sum(row["price"]),
+            seller=esc(row["seller_name"]) or "—",
+        )
+        for row in rows
+    ]
+    text = t(lang, "admin.accounts_title") + "\n\n" + "\n".join(lines)
+    await callback.answer()
+    await respond(callback, text, back_keyboard(lang, "admin:home"))
+
+
+@router.callback_query(F.data == "admin:audit")
+async def audit(callback: CallbackQuery, lang: str) -> None:
+    rows = await marketplace.list_audit_logs(20)
+    if not rows:
+        await callback.answer()
+        await respond(callback, t(lang, "admin.audit_empty"), back_keyboard(lang, "admin:home"))
+        return
+    lines = [
+        t(
+            lang,
+            "admin.audit_line",
+            action=esc(row["action"]),
+            actor=row["actor_tg"] or "—",
+            details=esc(row["details"]) or "—",
+            date=fmt_dt(row["created_at"]),
+        )
+        for row in rows
+    ]
+    text = t(lang, "admin.audit_title") + "\n\n" + "\n".join(lines)
+    await callback.answer()
+    await respond(callback, text, back_keyboard(lang, "admin:home"))
+
+
+# --------------------------------------------------------------------------
+# Users
+# --------------------------------------------------------------------------
+def _user_card(lang: str, target: dict) -> str:
+    role = (
+        t(lang, "profile.role_admin")
+        if target["is_admin"]
+        else t(lang, "profile.role_seller")
+        if target["is_seller"]
+        else t(lang, "profile.role_buyer")
+    )
+    status = (
+        t(lang, "admin.status_blocked")
+        if target["is_blocked"]
+        else t(lang, "admin.status_active")
+    )
+    test_state = t(lang, "admin.on") if target["test_mode"] else t(lang, "admin.off")
+    return t(
+        lang,
+        "admin.user_card",
+        id=target["id"],
+        tg=target["tg_id"],
+        name=esc(target["full_name"]) or "—",
+        username=esc(target["username"]) or "—",
+        phone=esc(target["phone"]) or "—",
+        role=role,
+        code=esc(target["seller_code"]) or "—",
+        balance=fmt_sum(target["balance"]),
+        test_balance=fmt_sum(target["test_balance"]),
+        status=status,
+        test_mode=test_state,
+        date=fmt_dt(target["created_at"]),
+    )
+
+
+async def _render_user(
+    event: Message | CallbackQuery, lang: str, target: dict
+) -> None:
+    await respond(event, _user_card(lang, target), admin_user_keyboard(lang, target))
+
+
+@router.callback_query(F.data == "admin:users")
+async def users_start(
+    callback: CallbackQuery, lang: str, state: FSMContext
+) -> None:
+    await state.set_state(AdminFlow.user_query)
+    if callback.message is not None:
+        await callback.message.answer(
+            t(lang, "admin.user_query_prompt"), reply_markup=cancel_reply(lang)
+        )
+    await callback.answer()
+
+
+@router.message(StateFilter(AdminFlow.user_query))
+async def users_search(message: Message, lang: str, state: FSMContext) -> None:
+    target = await users_service.search_user(message.text or "")
+    if target is None:
+        await message.answer(t(lang, "admin.user_not_found"))
+        return
+    await state.clear()
+    await _render_user(message, lang, target)
+
+
+@router.callback_query(F.data.startswith("admin:user:"))
+async def user_action(
+    callback: CallbackQuery, user: dict, lang: str, state: FSMContext
+) -> None:
+    parts = (callback.data or "").split(":")
+    if len(parts) != 4:
+        await callback.answer(t(lang, "common.invalid_data"), show_alert=True)
+        return
+    action = parts[2]
+    try:
+        db_id = int(parts[3])
+    except ValueError:
+        await callback.answer(t(lang, "common.invalid_data"), show_alert=True)
+        return
+    target = await users_service.get_user(db_id)
+    if target is None:
+        await callback.answer(t(lang, "admin.user_not_found"), show_alert=True)
+        return
+
+    if action == "balance":
+        await state.set_state(AdminFlow.balance_amount)
+        await state.update_data(target_user_id=db_id)
+        if callback.message is not None:
+            await callback.message.answer(
+                t(
+                    lang,
+                    "admin.balance_prompt",
+                    name=esc(target["full_name"]) or "—",
+                    tg=target["tg_id"],
+                    balance=fmt_sum(target["balance"]),
+                ),
+                reply_markup=cancel_reply(lang),
+            )
+        await callback.answer()
+        return
+
+    if action == "block":
+        await users_service.set_blocked(db_id, True)
+        await callback.answer(t(lang, "admin.blocked_ok", tg=target["tg_id"]))
+    elif action == "unblock":
+        await users_service.set_blocked(db_id, False)
+        await callback.answer(t(lang, "admin.unblocked_ok", tg=target["tg_id"]))
+    elif action == "verify":
+        await users_service.set_verified(db_id, True)
+        await callback.answer(t(lang, "admin.verified_ok", tg=target["tg_id"]))
+    elif action == "unverify":
+        await users_service.set_verified(db_id, False)
+        await callback.answer(t(lang, "admin.unverified_ok", tg=target["tg_id"]))
+    else:
+        await callback.answer(t(lang, "common.invalid_data"), show_alert=True)
+        return
+    await marketplace.log_audit(user["tg_id"], f"user.{action}", f"user#{db_id}")
+    fresh = await users_service.get_user(db_id)
+    if fresh is not None:
+        await _render_user(callback, lang, fresh)
+
+
+@router.message(StateFilter(AdminFlow.balance_amount))
+async def balance_amount(
+    message: Message, lang: str, state: FSMContext
+) -> None:
+    raw = (message.text or "").strip().replace(" ", "")
+    negative = raw.startswith("-")
+    amount = parse_amount(raw)
+    if amount is None or amount == 0:
+        await message.answer(t(lang, "admin.balance_amount_invalid"))
+        return
+    if negative:
+        amount = -amount
+    await state.update_data(amount=amount)
+    await state.set_state(AdminFlow.balance_note)
+    await message.answer(
+        t(lang, "admin.balance_note_prompt", amount=fmt_sum(amount)),
+        reply_markup=cancel_reply(lang),
+    )
+
+
+@router.message(StateFilter(AdminFlow.balance_note))
+async def balance_note(
+    message: Message, user: dict, lang: str, state: FSMContext, bot: Bot
+) -> None:
+    data = await state.get_data()
+    db_id = data.get("target_user_id")
+    amount = data.get("amount")
+    if not isinstance(db_id, int) or not isinstance(amount, int):
+        await state.clear()
+        await message.answer(t(lang, "common.invalid_data"))
+        return
+    note = (message.text or "").strip()
+    if note == "-":
+        note = ""
+    try:
+        updated, new_balance = await payment.admin_adjust_balance(
+            db_id, amount, note, user["tg_id"]
+        )
+    except ServiceError as exc:
+        await message.answer(str(exc))
+        return
+    await state.clear()
+    await message.answer(
+        t(
+            lang,
+            "admin.balance_updated",
+            amount=fmt_sum(amount),
+            balance=fmt_sum(new_balance),
+        ),
+        reply_markup=main_menu_reply(lang, bool(user["is_seller"]), True),
+    )
+    await notifications.balance_changed(bot, updated, amount, new_balance)
+    await marketplace.log_audit(user["tg_id"], "user.balance", f"user#{db_id}: {amount}")
+    await _render_user(message, lang, updated)
+
+
+# --------------------------------------------------------------------------
+# Broadcast
+# --------------------------------------------------------------------------
+@router.callback_query(F.data == "admin:broadcast")
+async def broadcast_start(
+    callback: CallbackQuery, lang: str, state: FSMContext
+) -> None:
+    await state.set_state(AdminFlow.broadcast_text)
+    if callback.message is not None:
+        await callback.message.answer(
+            t(lang, "admin.broadcast_prompt"), reply_markup=cancel_reply(lang)
+        )
+    await callback.answer()
+
+
+@router.message(StateFilter(AdminFlow.broadcast_text))
+async def broadcast_preview(message: Message, lang: str, state: FSMContext) -> None:
+    text = (message.text or "").strip()
+    if not text:
+        await message.answer(t(lang, "common.invalid_data"))
+        return
+    await state.update_data(broadcast_text=text)
+    await message.answer(
+        t(lang, "admin.broadcast_preview", text=esc(text)),
+        reply_markup=broadcast_keyboard(lang),
+    )
+
+
+@router.callback_query(F.data == "admin:broadcast:send")
+async def broadcast_send(
+    callback: CallbackQuery, user: dict, lang: str, state: FSMContext, bot: Bot
+) -> None:
+    data = await state.get_data()
+    text = data.get("broadcast_text")
+    if not text:
+        await callback.answer(t(lang, "common.invalid_data"), show_alert=True)
+        return
+    recipients = await users_service.broadcast_recipients()
+    sent = 0
+    failed = 0
+    for recipient in recipients:
+        ok = await notifications.send(bot, recipient["tg_id"], esc(text))
+        if ok:
+            sent += 1
+        else:
+            failed += 1
+        await asyncio.sleep(0.05)
+    await state.clear()
+    await marketplace.log_audit(
+        user["tg_id"], "broadcast", f"sent={sent} failed={failed}"
+    )
+    await callback.answer()
+    await respond(
+        callback,
+        t(lang, "admin.broadcast_done", sent=sent, failed=failed),
+        back_keyboard(lang, "admin:home"),
+    )
+
+
+# --------------------------------------------------------------------------
+# Test mode
+# --------------------------------------------------------------------------
+async def _render_test(
+    event: Message | CallbackQuery, target: dict, lang: str
+) -> None:
+    text = t(
+        lang,
+        "admin.test_title",
+        name=esc(target["full_name"]) or "—",
+        tg=target["tg_id"],
+        state=t(lang, "admin.on") if target["test_mode"] else t(lang, "admin.off"),
+        balance=fmt_sum(target["test_balance"]),
+    )
+    await respond(event, text, test_keyboard(lang, bool(target["test_mode"])))
+
+
+@router.callback_query(F.data == "admin:test")
+async def test_panel(callback: CallbackQuery, user: dict, lang: str) -> None:
+    await callback.answer()
+    await _render_test(callback, user, lang)
+
+
+@router.callback_query(F.data == "admin:test:toggle")
+async def test_toggle(callback: CallbackQuery, user: dict, lang: str) -> None:
+    updated = await users_service.toggle_test_mode(user["id"], TEST_INITIAL_BALANCE)
+    key = "admin.test_on_msg" if updated["test_mode"] else "admin.test_off_msg"
+    await callback.answer(
+        t(lang, key, balance=fmt_sum(updated["test_balance"])), show_alert=True
+    )
+    await _render_test(callback, updated, lang)
+
+
+@router.callback_query(F.data == "admin:test:seed")
+async def test_seed(callback: CallbackQuery, user: dict, lang: str) -> None:
+    system = await users_service.ensure_user(-1, "Test Sotuvchi", "test_seller")
+    if not system["is_seller"]:
+        system = await users_service.register_seller(system["id"], "+998000000000")
+    created = 0
+    for index in range(5):
+        login = f"test_{secrets.token_hex(4)}"
+        await marketplace.create_account(
+            system["id"],
+            f"Test akkaunt {index + 1}",
+            "Sinov uchun avtomatik yaratilgan akkaunt.",
+            login,
+            "password123",
+            10_000,
+            "test",
+        )
+        created += 1
+    await callback.answer(
+        t(lang, "admin.test_seeded", count=created), show_alert=True
+    )
+    fresh = await users_service.get_user(user["id"])
+    if fresh is not None:
+        await _render_test(callback, fresh, lang)

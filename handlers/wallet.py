@@ -1,200 +1,189 @@
-import asyncio
+﻿"""Wallet: top-ups, transaction history and requests."""
 
-from aiogram import F, Router
+from __future__ import annotations
+
+from aiogram import Bot, F, Router
+from aiogram.filters import StateFilter
 from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, Message
 
-import services
-from config import COMMISSION_PERCENT, MIN_TOPUP, PAYMENT_CARD, PAYMENT_HOLDER
-from keyboards import back_to_menu, cancel_kb, topup_review_kb, wallet_menu
-from notifications import notify_admin_topup
-from states import TopUp
-from utils import code, esc, fmt_dt, fmt_sum, parse_amount
+from config import MAX_TOPUP, MIN_TOPUP, PAYMENT_CARD, PAYMENT_HOLDER
+from handlers.helpers import is_admin_user, respond
+from handlers.views import render_wallet
+from keyboards.inline import back_keyboard
+from keyboards.reply import cancel_reply, main_menu_reply
+from services import notifications, payment
+from services.errors import ServiceError
+from services.i18n import t
+from states import TopupFlow
+from utils import fmt_dt, fmt_sum, parse_amount
 
 router = Router(name="wallet")
 
-MAX_TOPUP = 50_000_000
 
-TYPE_LABELS = {
-    "topup": "➕ Balans to'ldirish",
-    "purchase": "🛒 Akkaunt xaridi",
-    "penalty": "⏰ Kechikish jarimasi",
-    "sale": "💰 Savdo daromadi",
-    "commission": "🏦 Bot komissiyasi",
-    "withdraw": "💸 Pul yechish",
-    "withdraw_refund": "↩️ Pul yechish bekor qilindi",
-    "refund": "↩️ Xarid uchun qaytarish",
-    "adjustment": "⚙️ Admin tuzatishi",
-}
-
-REQUEST_STATUS_LABELS = {
-    "pending": "⏳ Kutilmoqda",
-    "approved": "✅ Tasdiqlangan",
-    "rejected": "❌ Rad etilgan",
-}
-
-
-async def show_wallet(message: Message, db_user):
-    user = await services.get_user(db_user["id"])
-    await message.answer(
-        "👛 <b>Hamyon</b>\n\n"
-        f"💰 Balans: <b>{fmt_sum(user['balance'])}</b>\n\n"
-        f"Platforma har bir savdodan {COMMISSION_PERCENT}% komissiya oladi.\n"
-        "Balansni karta orqali to'ldirishingiz mumkin. To'lov admin tomonidan "
-        "tasdiqlangach hisobingizga tushadi.",
-        reply_markup=wallet_menu(),
-    )
-
-
-@router.callback_query(F.data == "wallet:menu")
-async def cb_wallet(callback: CallbackQuery, state: FSMContext, db_user):
-    await state.clear()
+@router.callback_query(F.data == "menu:wallet")
+async def wallet(callback: CallbackQuery, user: dict, lang: str) -> None:
     await callback.answer()
-    await show_wallet(callback.message, db_user)
+    await render_wallet(callback, user, lang)
 
 
 @router.callback_query(F.data == "wallet:topup")
-async def cb_topup(callback: CallbackQuery, state: FSMContext, db_user):
-    await state.clear()
+async def topup_start(
+    callback: CallbackQuery, user: dict, lang: str, state: FSMContext
+) -> None:
+    if user["test_mode"]:
+        await callback.answer(t(lang, "wallet.test_mode_no_topup"), show_alert=True)
+        return
+    await state.set_state(TopupFlow.amount)
+    if callback.message is not None:
+        await callback.message.answer(
+            t(lang, "wallet.topup_title", min=fmt_sum(MIN_TOPUP), max=fmt_sum(MAX_TOPUP)),
+            reply_markup=cancel_reply(lang),
+        )
     await callback.answer()
-    await state.set_state(TopUp.amount)
-    await callback.message.answer(
-        "💳 <b>Balansni to'ldirish</b>\n\n"
-        f"To'ldirmoqchi bo'lgan summani kiriting (so'mda, faqat raqam).\n\n"
-        f"Minimal: {fmt_sum(MIN_TOPUP)}\n"
-        f"Maksimal: {fmt_sum(MAX_TOPUP)}",
-        reply_markup=cancel_kb(),
-    )
 
 
-@router.message(TopUp.amount, F.text)
-async def topup_amount(message: Message, state: FSMContext):
+@router.message(StateFilter(TopupFlow.amount))
+async def topup_amount(message: Message, lang: str, state: FSMContext) -> None:
     amount = parse_amount(message.text)
-    if amount is None or not MIN_TOPUP <= amount <= MAX_TOPUP:
+    if amount is None or amount < MIN_TOPUP or amount > MAX_TOPUP:
         await message.answer(
-            f"❌ Summa noto'g'ri. {fmt_sum(MIN_TOPUP)} dan "
-            f"{fmt_sum(MAX_TOPUP)} gacha kiriting."
+            t(
+                lang,
+                "wallet.amount_invalid",
+                min=fmt_sum(MIN_TOPUP),
+                max=fmt_sum(MAX_TOPUP),
+            )
         )
         return
-
     await state.update_data(amount=amount)
-    await state.set_state(TopUp.receipt)
+    await state.set_state(TopupFlow.receipt)
     await message.answer(
-        "💳 <b>To'lov ma'lumotlari</b>\n\n"
-        f"Summa: <b>{fmt_sum(amount)}</b>\n"
-        f"Karta: {code(PAYMENT_CARD)}\n"
-        f"Egasi: {esc(PAYMENT_HOLDER)}\n\n"
-        "1️⃣ Yuqoridagi kartaga shu summani o'tkazing.\n"
-        "2️⃣ To'lov chekini (skrinshot) yoki tranzaksiya ID sini shu chatga yuboring.\n\n"
-        "Admin tasdiqlagach balansingiz avtomatik to'ladi.",
-        reply_markup=cancel_kb(),
+        t(
+            lang,
+            "wallet.payment_info",
+            amount=fmt_sum(amount),
+            card=PAYMENT_CARD,
+            holder=PAYMENT_HOLDER,
+        ),
+        reply_markup=cancel_reply(lang),
     )
 
 
-@router.message(TopUp.receipt, F.photo | F.document | F.text)
-async def topup_receipt(message: Message, state: FSMContext, db_user):
-    data = await state.get_data()
-    amount = int(data.get("amount", 0))
-    if amount <= 0:
-        await state.clear()
-        await message.answer("❌ Ma'lumotlar eskirgan.", reply_markup=back_to_menu())
-        return
-
+@router.message(StateFilter(TopupFlow.receipt))
+async def topup_receipt(
+    message: Message, user: dict, lang: str, state: FSMContext, bot: Bot
+) -> None:
+    receipt_type: str | None = None
+    receipt_value: str | None = None
     if message.photo:
         receipt_type = "photo"
         receipt_value = message.photo[-1].file_id
     elif message.document:
         receipt_type = "document"
         receipt_value = message.document.file_id
-    else:
+    elif message.text:
         receipt_type = "text"
-        receipt_value = (message.text or "").strip()[:500]
-        if len(receipt_value) < 3:
-            await message.answer("❌ Chek ma'lumoti juda qisqa. Qaytadan yuboring.")
+        receipt_value = message.text.strip()
+        if len(receipt_value) < 4:
+            await message.answer(t(lang, "wallet.receipt_too_short"))
             return
+    if receipt_type is None or receipt_value is None:
+        await message.answer(t(lang, "wallet.receipt_invalid"))
+        return
 
-    topup_id = await services.create_topup(
-        db_user["id"], amount, receipt_type, receipt_value
-    )
+    data = await state.get_data()
+    amount = int(data.get("amount", 0))
+    try:
+        topup = await payment.create_topup(user["id"], amount, receipt_type, receipt_value)
+    except ServiceError as exc:
+        await message.answer(str(exc))
+        return
     await state.clear()
     await message.answer(
-        "✅ <b>To'lov so'rovi yuborildi</b>\n\n"
-        f"So'rov ID: {code(topup_id)}\n"
-        f"Summa: <b>{fmt_sum(amount)}</b>\n\n"
-        "Admin tekshirgach, balansingiz to'ladi. Bu odatda bir necha daqiqa "
-        "vaqt oladi.",
-        reply_markup=back_to_menu(),
+        t(lang, "wallet.topup_created", id=topup["id"], amount=fmt_sum(topup["amount"])),
+        reply_markup=main_menu_reply(lang, bool(user["is_seller"]), is_admin_user(user)),
     )
-
-    topup = await services.get_topup_details(topup_id)
-    if topup is not None:
-        await notify_admin_topup(
-            message.bot, topup, topup_review_kb(topup_id)
-        )
-
-
-@router.message(TopUp.receipt)
-async def topup_receipt_wrong(message: Message):
-    await message.answer(
-        "🧾 Iltimos, chekni rasm, hujjat yoki tranzaksiya ID (matn) ko'rinishida yuboring."
+    info = dict(topup)
+    info.update(
+        user_name=user["full_name"],
+        user_tg=user["tg_id"],
+        username=user["username"],
     )
+    await notifications.topup_created_admins(bot, info)
 
 
 @router.callback_query(F.data == "wallet:history")
-async def cb_wallet_history(callback: CallbackQuery, state: FSMContext, db_user):
-    await state.clear()
-    transactions = await services.list_transactions(db_user["id"], limit=15)
-    await callback.answer()
-    if not transactions:
-        await callback.message.answer(
-            "🧾 Hozircha tranzaksiyalar yo'q.", reply_markup=back_to_menu()
-        )
-        return
+async def history(callback: CallbackQuery, user: dict, lang: str) -> None:
+    mode = "test" if user["test_mode"] else "real"
+    rows = await payment.list_transactions(user["id"], mode)
+    if not rows:
+        await callback.answer()
 
-    lines = ["🧾 <b>Oxirgi tranzaksiyalar</b>\n"]
-    for tx in transactions:
-        label = TYPE_LABELS.get(tx["type"], tx["type"])
-        sign = "+" if tx["amount"] > 0 else ""
+        await respond(callback, t(lang, "wallet.no_transactions"), back_keyboard(lang, "menu:wallet"))
+        return
+    lines = []
+    for row in rows:
+        sign = "+" if int(row["amount"]) > 0 else "-"
+        label = t(lang, f"tx.type.{row['type']}")
         lines.append(
-            f"• {label}: <b>{sign}{fmt_sum(tx['amount'])}</b>\n"
-            f"  {fmt_dt(tx['created_at'])}"
+            t(
+                lang,
+                "wallet.tx_line",
+                label=label,
+                sign=sign,
+                amount=fmt_sum(abs(int(row["amount"]))),
+                date=fmt_dt(row["created_at"]),
+            )
         )
-    await callback.message.answer(
-        "\n".join(lines), reply_markup=back_to_menu()
-    )
+    text = t(lang, "wallet.history") + "\n\n" + "\n".join(lines)
+
+    await callback.answer()
+    await respond(callback, text, back_keyboard(lang, "menu:wallet"))
 
 
 @router.callback_query(F.data == "wallet:requests")
-async def cb_wallet_requests(callback: CallbackQuery, state: FSMContext, db_user):
-    await state.clear()
-    topups, withdrawals = await asyncio.gather(
-        services.list_user_topups(db_user["id"], limit=10),
-        services.list_user_withdrawals(db_user["id"], limit=10),
-    )
-    await callback.answer()
+async def requests_history(callback: CallbackQuery, user: dict, lang: str) -> None:
+    topups = await payment.list_user_topups(user["id"])
+    withdrawals = await payment.list_user_withdrawals(user["id"])
     if not topups and not withdrawals:
-        await callback.message.answer(
-            "📋 Hozircha so'rovlar yo'q.", reply_markup=wallet_menu()
-        )
+        await callback.answer()
+
+        await respond(callback, t(lang, "wallet.no_requests"), back_keyboard(lang, "menu:wallet"))
         return
 
-    lines = ["📋 <b>So'rovlar tarixi</b>\n"]
+    def status_label(status: str) -> str:
+        key = "approved" if status == "paid" else status
+        return t(lang, f"wallet.status.{key}")
+
+    blocks: list[str] = []
     if topups:
-        lines.append("<b>➕ Balans to'ldirish:</b>")
-        for item in topups:
-            status = REQUEST_STATUS_LABELS.get(item["status"], item["status"])
-            lines.append(
-                f"• #{item['id']} — {fmt_sum(item['amount'])} — {status} "
-                f"({fmt_dt(item['created_at'])})"
+        rows = [
+            t(
+                lang,
+                "wallet.request_line",
+                id=row["id"],
+                amount=fmt_sum(row["amount"]),
+                status=status_label(row["status"]),
+                date=fmt_dt(row["created_at"]),
             )
+            for row in topups
+        ]
+        blocks.append(t(lang, "wallet.topups_section") + "\n" + "\n".join(rows))
     if withdrawals:
-        if topups:
-            lines.append("")
-        lines.append("<b>💸 Pul yechish:</b>")
-        for item in withdrawals:
-            status = REQUEST_STATUS_LABELS.get(item["status"], item["status"])
-            lines.append(
-                f"• #{item['id']} — {fmt_sum(item['amount'])} — {status} "
-                f"({fmt_dt(item['created_at'])})"
+        rows = [
+            t(
+                lang,
+                "wallet.request_line",
+                id=row["id"],
+                amount=fmt_sum(row["amount"]),
+                status=status_label(row["status"]),
+                date=fmt_dt(row["created_at"]),
             )
-    await callback.message.answer("\n".join(lines), reply_markup=wallet_menu())
+            for row in withdrawals
+        ]
+        blocks.append(t(lang, "wallet.withdrawals_section") + "\n" + "\n".join(rows))
+    text = t(lang, "wallet.requests_title") + "\n\n" + "\n\n".join(blocks)
+
+    await callback.answer()
+    await respond(callback, text, back_keyboard(lang, "menu:wallet"))
