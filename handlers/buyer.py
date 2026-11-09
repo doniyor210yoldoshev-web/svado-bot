@@ -11,6 +11,8 @@ import services
 from config import (
     CHECK_MINUTES,
     COMMISSION_PERCENT,
+    PAYMENT_CARD,
+    PAYMENT_HOLDER,
     PENALTY_INTERVAL_MINUTES,
     PENALTY_PERCENT,
     SELLER_SHARE_PERCENT,
@@ -23,9 +25,10 @@ from keyboards import (
     dispute_review_kb,
     order_actions,
     order_detail_kb,
+    payment_methods_kb,
 )
 from notifications import notify_admin_dispute
-from states import DisputeFlow, SellerSearch
+from states import DisputeFlow, SellerSearch, TopUp
 from utils import (
     ORDER_STATUS_LABELS,
     code,
@@ -106,10 +109,67 @@ async def cb_shop_account(callback: CallbackQuery, state: FSMContext, db_user):
         f"👤 Sotuvchi: {esc(seller['full_name'])}\n"
         f"🔑 Sotuvchi kodi: {code(seller['seller_code'])}\n"
         f"💰 Narx: <b>{fmt_sum(account['price'])}</b>\n\n"
-        "To'lov hamyoningizdan yechiladi. To'lovdan so'ng login-parol ochiladi va "
-        f"tekshirish uchun {CHECK_MINUTES} daqiqa vaqt beriladi.\n\n"
+        "To'lov usulini tanlab, xaridni yakunlang. To'lovdan so'ng login-parol "
+        f"ochiladi va tekshirish uchun {CHECK_MINUTES} daqiqa vaqt beriladi.\n\n"
         f"💳 Balansingiz: <b>{fmt_sum(buyer['balance'])}</b>",
-        reply_markup=account_offer_kb(account["id"], buyer["balance"], account["price"]),
+        reply_markup=account_offer_kb(account["id"]),
+    )
+
+
+@router.callback_query(F.data.startswith("shop:pay:"))
+async def cb_pay_method(callback: CallbackQuery, state: FSMContext, db_user):
+    await state.clear()
+    try:
+        account_id = int(callback.data.split(":")[2])
+    except (ValueError, IndexError):
+        await callback.answer("Noto'g'ri ma'lumot", show_alert=True)
+        return
+
+    account = await services.get_account(account_id)
+    if account is None or account["status"] != "active":
+        await callback.answer("Bu akkaunt sotuvda emas", show_alert=True)
+        return
+
+    buyer = await services.get_user(db_user["id"])
+    await callback.answer()
+    await callback.message.answer(
+        "💳 <b>To'lov usulini tanlang</b>\n\n"
+        f"📦 Akkaunt: <b>#{account['id']}</b>\n"
+        f"💰 Narx: <b>{fmt_sum(account['price'])}</b>\n"
+        f"👛 Balansingiz: <b>{fmt_sum(buyer['balance'])}</b>\n\n"
+        "Hamyon balansidan darhol to'lashingiz yoki kartadan balansni "
+        "to'ldirib, so'ng xarid qilishingiz mumkin.",
+        reply_markup=payment_methods_kb(account["id"]),
+    )
+
+
+@router.callback_query(F.data.startswith("shop:card:"))
+async def cb_pay_card(callback: CallbackQuery, state: FSMContext, db_user):
+    await state.clear()
+    try:
+        account_id = int(callback.data.split(":")[2])
+    except (ValueError, IndexError):
+        await callback.answer("Noto'g'ri ma'lumot", show_alert=True)
+        return
+
+    account = await services.get_account(account_id)
+    if account is None or account["status"] != "active":
+        await callback.answer("Bu akkaunt sotuvda emas", show_alert=True)
+        return
+
+    await callback.answer()
+    await state.set_state(TopUp.receipt)
+    await state.update_data(amount=account["price"])
+    await callback.message.answer(
+        "🏦 <b>Karta orqali to'lov</b>\n\n"
+        f"📦 Akkaunt: <b>#{account['id']}</b>\n"
+        f"💰 Summa: <b>{fmt_sum(account['price'])}</b>\n"
+        f"💳 Karta: {code(PAYMENT_CARD)}\n"
+        f"👤 Egasi: {esc(PAYMENT_HOLDER)}\n\n"
+        "1️⃣ Yuqoridagi kartaga aynan shu summani o'tkazing.\n"
+        "2️⃣ To'lov chekini (skrinshot) yoki tranzaksiya ID sini shu chatga yuboring.\n\n"
+        "Admin tasdiqlagach balansingiz to'ladi va akkauntni sotib olishingiz mumkin.",
+        reply_markup=cancel_kb(f"shop:pay:{account['id']}"),
     )
 
 

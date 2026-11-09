@@ -147,14 +147,23 @@ def buyer_accounts_kb(accounts) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
-def account_offer_kb(account_id: int, balance: int, price: int) -> InlineKeyboardMarkup:
-    rows = []
-    if balance >= price:
-        rows.append([_btn("✅ Sotib olish", f"shop:confirm:{account_id}")])
-    else:
-        rows.append([_btn("➕ Balansni to'ldirish", "wallet:topup")])
-    rows.append([_btn("🔙 Orqaga", "buyer:search")])
-    return InlineKeyboardMarkup(inline_keyboard=rows)
+def account_offer_kb(account_id: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [_btn("💳 To'lov usulini tanlash", f"shop:pay:{account_id}")],
+            [_btn("🔙 Orqaga", "buyer:search")],
+        ]
+    )
+
+
+def payment_methods_kb(account_id: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [_btn("👛 Hamyon balansidan to'lash", f"shop:confirm:{account_id}")],
+            [_btn("🏦 Karta orqali to'lash", f"shop:card:{account_id}")],
+            [_btn("🔙 Orqaga", f"shop:acct:{account_id}")],
+        ]
+    )
 
 
 def order_actions(order_id: int) -> InlineKeyboardMarkup:
