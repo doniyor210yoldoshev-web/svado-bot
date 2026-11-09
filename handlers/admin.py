@@ -18,7 +18,7 @@ from aiogram.types import (
 )
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
-from config import TEST_INITIAL_BALANCE
+from config import TEST_INITIAL_BALANCE, TEST_MAX_ACCOUNTS
 from handlers.helpers import respond
 from keyboards.inline import (
     admin_menu_keyboard,
@@ -666,6 +666,20 @@ async def broadcast_send(
 # --------------------------------------------------------------------------
 # Test mode
 # --------------------------------------------------------------------------
+_TEST_ACCOUNT_TEMPLATES: tuple[tuple[str, str, int], ...] = (
+    ("Instagram • 5 000 obunachi", "2019-yilda ochilgan, faol auditoriya, blok yo'q.", 45_000),
+    ("Telegram kanal • 2 000 a'zo", "O'zbek tilidagi yangiliklar kanali, admin panel bilan.", 25_000),
+    ("TikTok • 10 000 kuzatuvchi", "TikTok akkaunti, original video joylash uchun tayyor.", 60_000),
+    ("Gmail • yangi pochta", "Yangi ochilgan Gmail, barcha xavfsizlik sozlamalari yoqilgan.", 8_000),
+    ("Facebook • 2018 akkaunt", "Uzoq yillik akkaunt, do'stlar ro'yxati mavjud.", 30_000),
+    ("YouTube • 1 000 obunachi", "Monetizatsiya talablariga yaqin kanal.", 55_000),
+    ("Discord • Nitro akkaunt", "To'liq profilli Discord, serverlar uchun tayyor.", 18_000),
+    ("X (Twitter) • 500 kuzatuvchi", "Tweetlar tarixi toza, faol akkaunt.", 22_000),
+    ("Steam • o'yinlar bilan", "Bir nechta o'yin va balans mavjud akkaunt.", 40_000),
+    ("Netflix • 1 oylik", "Premium rejasi faol, 4 ta qurilmada ishlaydi.", 12_000),
+)
+
+
 async def _render_test(
     event: Message | CallbackQuery, target: dict, lang: str
 ) -> None:
@@ -701,16 +715,22 @@ async def test_seed(callback: CallbackQuery, user: dict, lang: str) -> None:
     system = await users_service.ensure_user(-1, "Test Sotuvchi", "test_seller")
     if not system["is_seller"]:
         system = await users_service.register_seller(system["id"], "+998000000000")
+    existing_accounts = await marketplace.list_seller_accounts(system["id"])
+    existing = sum(1 for account in existing_accounts if account["mode"] == "test")
+    remaining = max(0, TEST_MAX_ACCOUNTS - existing)
     created = 0
-    for index in range(5):
+    for offset in range(remaining):
+        title, description, price = _TEST_ACCOUNT_TEMPLATES[
+            (existing + offset) % len(_TEST_ACCOUNT_TEMPLATES)
+        ]
         login = f"test_{secrets.token_hex(4)}"
         await marketplace.create_account(
             system["id"],
-            f"Test akkaunt {index + 1}",
-            "Sinov uchun avtomatik yaratilgan akkaunt.",
+            title,
+            description,
             login,
             "password123",
-            10_000,
+            price,
             "test",
         )
         created += 1
