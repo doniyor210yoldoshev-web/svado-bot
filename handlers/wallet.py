@@ -7,11 +7,18 @@ from aiogram.filters import StateFilter
 from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, Message
 
-from config import MAX_TOPUP, MIN_TOPUP, PAYMENT_CARD, PAYMENT_HOLDER
+from config import (
+    MAX_TOPUP,
+    MIN_TOPUP,
+    PAYMENT_CARD,
+    PAYMENT_HOLDER,
+    PAYMENT_PROVIDER,
+)
 from handlers.helpers import is_admin_user, respond
 from handlers.views import render_wallet
-from keyboards.inline import back_keyboard
+from keyboards.inline import back_keyboard, click_payment_keyboard
 from keyboards.reply import cancel_reply, main_menu_reply
+from services import click as click_service
 from services import notifications, payment
 from services.errors import ServiceError
 from services.i18n import t
@@ -44,7 +51,9 @@ async def topup_start(
 
 
 @router.message(StateFilter(TopupFlow.amount))
-async def topup_amount(message: Message, lang: str, state: FSMContext) -> None:
+async def topup_amount(
+    message: Message, user: dict, lang: str, state: FSMContext
+) -> None:
     amount = parse_amount(message.text)
     if amount is None or amount < MIN_TOPUP or amount > MAX_TOPUP:
         await message.answer(
@@ -56,6 +65,26 @@ async def topup_amount(message: Message, lang: str, state: FSMContext) -> None:
             )
         )
         return
+
+    if PAYMENT_PROVIDER == "click":
+        if not click_service.is_configured():
+            await state.clear()
+            await message.answer(t(lang, "wallet.click_unavailable"))
+            return
+        try:
+            topup = await payment.create_click_topup(user["id"], amount)
+        except ServiceError as exc:
+            await message.answer(str(exc))
+            return
+        await state.clear()
+        await message.answer(
+            t(lang, "wallet.click_title", amount=fmt_sum(topup["amount"])),
+            reply_markup=click_payment_keyboard(
+                lang, click_service.build_payment_url(topup)
+            ),
+        )
+        return
+
     await state.update_data(amount=amount)
     await state.set_state(TopupFlow.receipt)
     await message.answer(

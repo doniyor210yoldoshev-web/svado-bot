@@ -45,12 +45,22 @@ if DEFAULT_LANG not in SUPPORTED_LANGS:
     DEFAULT_LANG = "uz"
 
 # --- Payments -------------------------------------------------------------
-# manual  -> card transfer verified by an admin (default)
-# provider-> reserved for a licensed payment provider integration
+# manual -> card transfer verified by an admin (default)
+# click  -> Click (click.uz) SHOP API with prepare/complete callbacks
 PAYMENT_PROVIDER = os.getenv("PAYMENT_PROVIDER", "manual").strip().lower()
 PAYMENT_CARD = os.getenv("PAYMENT_CARD", "8600 0000 0000 0000").strip()
 PAYMENT_HOLDER = os.getenv("PAYMENT_HOLDER", "Marketplace Admin").strip()
 SUPPORT_USERNAME = os.getenv("SUPPORT_USERNAME", "").strip().lstrip("@")
+
+# --- Click (click.uz) -----------------------------------------------------
+# Fill these in from the merchant cabinet (merchant.click.uz).
+CLICK_SERVICE_ID = os.getenv("CLICK_SERVICE_ID", "").strip()
+CLICK_MERCHANT_ID = os.getenv("CLICK_MERCHANT_ID", "").strip()
+CLICK_MERCHANT_USER_ID = os.getenv("CLICK_MERCHANT_USER_ID", "").strip()
+CLICK_SECRET_KEY = os.getenv("CLICK_SECRET_KEY", "").strip()
+CLICK_PAY_URL = os.getenv("CLICK_PAY_URL", "https://my.click.uz/services/pay").strip()
+# Public HTTPS base URL of the deployed service (e.g. Render), used in docs.
+PUBLIC_BASE_URL = os.getenv("PUBLIC_BASE_URL", "").strip().rstrip("/")
 
 # --- Business rules -------------------------------------------------------
 COMMISSION_PERCENT = int(os.getenv("COMMISSION_PERCENT", "8"))

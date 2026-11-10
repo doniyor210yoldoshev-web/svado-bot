@@ -86,6 +86,104 @@ async def create_topup(
     return await db.fetchone("SELECT * FROM topups WHERE id = ?", (topup_id,))
 
 
+async def create_click_topup(user_id: int, amount: int) -> dict:
+    """Create a pending top-up that will be confirmed by Click's callback."""
+    if amount < MIN_TOPUP or amount > MAX_TOPUP:
+        raise ServiceError(
+            f"To'ldirish miqdori {fmt_sum(MIN_TOPUP)} va {fmt_sum(MAX_TOPUP)} orasida bo'lishi kerak"
+        )
+    topup_id = await db.insert(
+        "INSERT INTO topups "
+        "(user_id, amount, receipt_type, receipt_value, status, mode, created_at) "
+        "VALUES (?, ?, 'click', '', 'pending', 'real', ?)",
+        (user_id, amount, utcnow_iso()),
+    )
+    row = await db.fetchone("SELECT * FROM topups WHERE id = ?", (topup_id,))
+    if row is None:
+        raise ServiceError("To'lov yaratib bo'lmadi. Keyinroq urinib ko'ring.")
+    return row
+
+
+async def get_click_topup(topup_id: int) -> dict | None:
+    row = await get_topup(topup_id)
+    if row is None or row.get("receipt_type") != "click":
+        return None
+    return row
+
+
+async def mark_click_prepared(topup_id: int, click_trans_id: str) -> None:
+    await db.execute(
+        "UPDATE topups SET receipt_value = ? WHERE id = ? AND status = 'pending'",
+        ((click_trans_id or "click")[:200], topup_id),
+    )
+
+
+async def cancel_click_topup(topup_id: int) -> None:
+    await db.execute(
+        "UPDATE topups SET status = 'rejected', reviewed_at = ? "
+        "WHERE id = ? AND status = 'pending'",
+        (utcnow_iso(), topup_id),
+    )
+
+
+async def complete_click_topup(
+    topup_id: int, click_trans_id: str = "", click_paydoc_id: str = ""
+) -> dict | None:
+    """Credit the user's wallet once. Returns None for unknown/foreign top-ups."""
+    async with db.transaction() as ex:
+        topup = await ex.fetchone("SELECT * FROM topups WHERE id = ?", (topup_id,))
+        if topup is None or topup["receipt_type"] != "click":
+            return None
+        user = await ex.fetchone(
+            "SELECT tg_id, lang FROM users WHERE id = ?", (topup["user_id"],)
+        )
+        info = {
+            "topup_id": topup_id,
+            "amount": int(topup["amount"]),
+            "user_tg": user["tg_id"] if user else None,
+            "user_lang": user["lang"] if user else None,
+        }
+        if topup["status"] == "approved":
+            info["already"] = True
+            return info
+        if topup["status"] != "pending":
+            return None
+
+        updated = await ex.execute(
+            "UPDATE topups SET status = 'approved', reviewed_by = 0, reviewed_at = ?, "
+            "receipt_value = ? WHERE id = ? AND status = 'pending'",
+            (
+                utcnow_iso(),
+                (click_trans_id or "click")[:200],
+                topup_id,
+            ),
+        )
+        if updated == 0:
+            info["already"] = True
+            return info
+
+        await ex.execute(
+            "UPDATE users SET balance = balance + ? WHERE id = ?",
+            (int(topup["amount"]), topup["user_id"]),
+        )
+        description = f"Click to'lov #{topup_id} (click_trans_id: {click_trans_id})"
+        if click_paydoc_id:
+            description += f", paydoc: {click_paydoc_id}"
+        await ex.execute(
+            "INSERT INTO transactions "
+            "(user_id, amount, type, mode, reference, description, created_at) "
+            "VALUES (?, ?, 'topup', 'real', ?, ?, ?)",
+            (
+                topup["user_id"],
+                int(topup["amount"]),
+                f"topup:{topup_id}",
+                description[:500],
+                utcnow_iso(),
+            ),
+        )
+        return info
+
+
 async def list_user_topups(user_id: int, limit: int = 10) -> list[dict]:
     return await db.fetchall(
         "SELECT * FROM topups WHERE user_id = ? ORDER BY id DESC LIMIT ?",
@@ -98,7 +196,8 @@ async def list_pending_topups(limit: int = 10) -> list[dict]:
         "SELECT t.*, u.tg_id AS user_tg, u.full_name AS user_name, "
         "u.seller_code AS seller_code, u.username AS username, u.lang AS user_lang "
         "FROM topups t JOIN users u ON u.id = t.user_id "
-        "WHERE t.status = 'pending' ORDER BY t.id ASC LIMIT ?",
+        "WHERE t.status = 'pending' AND t.receipt_type != 'click' "
+        "ORDER BY t.id ASC LIMIT ?",
         (limit,),
     )
 

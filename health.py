@@ -16,10 +16,16 @@ import json
 import logging
 import os
 import time
+from urllib.parse import parse_qsl
+
+from aiogram import Bot
 
 from database.db import db
+from services import click as click_service
 
 logger = logging.getLogger(__name__)
+
+_MAX_REQUEST_BYTES = 131_072
 
 
 def _response(status: str, content_type: str, body: bytes) -> bytes:
@@ -32,7 +38,56 @@ def _response(status: str, content_type: str, body: bytes) -> bytes:
     return headers.encode("latin-1") + body
 
 
-async def start_health_server() -> asyncio.AbstractServer | None:
+async def _read_request(
+    reader: asyncio.StreamReader,
+) -> tuple[str, dict[str, str], bytes]:
+    buffer = b""
+    while b"\r\n\r\n" not in buffer:
+        chunk = await reader.read(1024)
+        if not chunk:
+            break
+        buffer += chunk
+        if len(buffer) > _MAX_REQUEST_BYTES:
+            break
+    head, _, body = buffer.partition(b"\r\n\r\n")
+    lines = head.split(b"\r\n")
+    request_line = lines[0].decode("latin-1", "ignore") if lines else ""
+    headers: dict[str, str] = {}
+    for line in lines[1:]:
+        name, _, value = line.partition(b":")
+        headers[name.decode("latin-1", "ignore").strip().lower()] = value.decode(
+            "latin-1", "ignore"
+        ).strip()
+    try:
+        length = int(headers.get("content-length", "0") or "0")
+    except ValueError:
+        length = 0
+    length = min(length, _MAX_REQUEST_BYTES)
+    while len(body) < length:
+        chunk = await reader.read(length - len(body))
+        if not chunk:
+            break
+        body += chunk
+    return request_line, headers, body
+
+
+def _parse_body(headers: dict[str, str], body: bytes) -> dict[str, str]:
+    if not body:
+        return {}
+    content_type = headers.get("content-type", "")
+    if "application/json" in content_type:
+        try:
+            payload = json.loads(body.decode("utf-8", "ignore"))
+        except json.JSONDecodeError:
+            return {}
+        if not isinstance(payload, dict):
+            return {}
+        return {str(key): str(value) for key, value in payload.items()}
+    text = body.decode("utf-8", "ignore")
+    return {key: value for key, value in parse_qsl(text, keep_blank_values=True)}
+
+
+async def start_health_server(bot: Bot | None = None) -> asyncio.AbstractServer | None:
     port_raw = os.getenv("PORT")
     if not port_raw:
         return None
@@ -42,16 +97,43 @@ async def start_health_server() -> asyncio.AbstractServer | None:
         logger.error("PORT noto'g'ri: %s", port_raw)
         return None
 
+    if bot is not None:
+        click_service.set_bot(bot)
+
     started_at = time.monotonic()
 
     async def handle(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
         try:
-            request = await reader.read(2048)
-            request_line = request.split(b"\r\n", 1)[0].decode("latin-1", "ignore")
+            request_line, headers, body = await _read_request(reader)
             parts = request_line.split()
+            method = parts[0].upper() if parts else "GET"
             path = parts[1].split("?", 1)[0] if len(parts) >= 2 else "/"
 
-            if path in ("/health", "/healthz", "/ping"):
+            if path in ("/click/prepare", "/click/complete", "/click"):
+                if method != "POST":
+                    response = _response(
+                        "405 Method Not Allowed",
+                        "text/plain",
+                        b"Method Not Allowed",
+                    )
+                else:
+                    data = _parse_body(headers, body)
+                    try:
+                        result = await click_service.handle_request(data)
+                    except Exception:
+                        logger.exception("Click so'rovida xatolik")
+                        result = {
+                            "click_trans_id": data.get("click_trans_id", ""),
+                            "merchant_trans_id": data.get("merchant_trans_id", ""),
+                            "error": -8,
+                            "error_note": "Error in request from click",
+                        }
+                    response = _response(
+                        "200 OK",
+                        "application/json",
+                        json.dumps(result).encode("utf-8"),
+                    )
+            elif path in ("/health", "/healthz", "/ping"):
                 db_ok = True
                 try:
                     await db.fetchone("SELECT 1 AS ok")

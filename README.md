@@ -64,6 +64,24 @@ Birinchi ishga tushirishda `data/` papkasi va SQLite bazasi avtomatik yaratiladi
 
 To'liq ro'yxat: `.env.example`.
 
+## Click (click.uz) to'lovini ulash
+
+1. `merchant.click.uz` kabinetida quyidagi URL larni kiriting (domeningiz bilan):
+   - **Prepare URL**: `https://<domen>/click/prepare`
+   - **Complete URL**: `https://<domen>/click/complete`
+2. `.env` faylida `PAYMENT_PROVIDER=click` qilib, kabinetdan olingan qiymatlarni yozing:
+   `CLICK_SERVICE_ID`, `CLICK_MERCHANT_ID`, `CLICK_MERCHANT_USER_ID`,
+   `CLICK_SECRET_KEY`. `PUBLIC_BASE_URL` ga ochiq HTTPS manzilni yozing
+   (masalan `https://marketplace-bot.onrender.com`).
+3. Server `PORT` muhit o'zgaruvchisida ishlashi kerak (Render buni avtomatik beradi).
+4. To'lov oqimi: botda summa kiritiladi -> Click to'lov havolasi beriladi ->
+   Click `prepare`/`complete` yuboradi -> balans avtomatik to'ldiriladi va
+   foydalanuvchiga xabar boradi.
+
+Imzo (MD5 `sign_string`) har bir so'rovda tekshiriladi; `complete`da Click xatosi
+(`error < 0`) bo'lsa to'lov bekor qilinadi. Click to'lovlari admin panelning
+"To'lovlar" ro'yxatida ko'rinmaydi (ular avtomatik tasdiqlanadi).
+
 ## Render'ga deploy qilish
 
 1. Render'da **PostgreSQL** yarating va `DATABASE_URL` ni oling.

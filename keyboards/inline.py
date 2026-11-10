@@ -64,6 +64,15 @@ def back_and(lang: str, text: str, data: str, target: str = "menu:home") -> Inli
     )
 
 
+def click_payment_keyboard(lang: str, url: str) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text=t(lang, "wallet.click_pay"), url=url)],
+            [_b(t(lang, "common.back"), "menu:wallet")],
+        ]
+    )
+
+
 def _pagination(
     kb: InlineKeyboardBuilder, lang: str, prefix: str, page: int, total_pages: int
 ) -> None:

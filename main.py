@@ -73,7 +73,7 @@ async def main() -> None:
     except Exception as exc:  # noqa: BLE001 - commands are non critical
         logger.warning("Buyruqlarni o'rnatib bo'lmadi: %s", exc)
 
-    health_server = await start_health_server()
+    health_server = await start_health_server(bot)
     scheduler_task = start_scheduler(bot)
 
     try:
