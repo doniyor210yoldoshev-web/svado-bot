@@ -8,20 +8,18 @@ from aiogram.utils.keyboard import ReplyKeyboardBuilder
 from services.i18n import t
 
 
-def main_menu_reply(lang: str, is_seller: bool, is_admin: bool) -> ReplyKeyboardMarkup:
+def main_menu_reply(lang: str, is_seller: bool = False, is_admin: bool = False) -> ReplyKeyboardMarkup:
     kb = ReplyKeyboardBuilder()
+    # 9 exact sections required by Section 3
     kb.button(text=t(lang, "menu.browse"))
+    kb.button(text=t(lang, "menu.sell"))
     kb.button(text=t(lang, "menu.search"))
+    kb.button(text=t(lang, "menu.my_accounts"))
+    kb.button(text=t(lang, "menu.my_orders"))
     kb.button(text=t(lang, "menu.wallet"))
-    kb.button(text=t(lang, "menu.purchases"))
-    kb.button(text=t(lang, "menu.profile"))
+    kb.button(text=t(lang, "menu.history"))
     kb.button(text=t(lang, "menu.settings"))
-    if is_seller:
-        kb.button(text=t(lang, "menu.seller_panel"))
-    else:
-        kb.button(text=t(lang, "menu.become_seller"))
-    kb.button(text=t(lang, "menu.rules"))
-    kb.button(text=t(lang, "menu.support"))
+    kb.button(text=t(lang, "menu.help"))
     if is_admin:
         kb.button(text=t(lang, "menu.admin"))
     kb.adjust(2)

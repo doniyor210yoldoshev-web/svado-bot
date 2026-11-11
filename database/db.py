@@ -35,6 +35,10 @@ _SCHEMA: list[str] = [
         is_admin INTEGER NOT NULL DEFAULT 0,
         is_blocked INTEGER NOT NULL DEFAULT 0,
         is_verified INTEGER NOT NULL DEFAULT 0,
+        phone_verified INTEGER NOT NULL DEFAULT 0,
+        terms_accepted INTEGER NOT NULL DEFAULT 0,
+        active_disputes INTEGER NOT NULL DEFAULT 0,
+        failed_disputes INTEGER NOT NULL DEFAULT 0,
         test_mode INTEGER NOT NULL DEFAULT 0,
         balance BIGINT NOT NULL DEFAULT 0,
         test_balance BIGINT NOT NULL DEFAULT 0,
@@ -46,9 +50,14 @@ _SCHEMA: list[str] = [
     """
     CREATE TABLE IF NOT EXISTS accounts (
         id {{ID}},
+        display_id INTEGER UNIQUE,
         seller_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
         title TEXT NOT NULL DEFAULT '',
         description TEXT NOT NULL DEFAULT '',
+        photo_id TEXT,
+        extra_info TEXT NOT NULL DEFAULT '',
+        verification_code TEXT,
+        verification_status TEXT NOT NULL DEFAULT 'verified',
         login_enc TEXT NOT NULL,
         login_hash TEXT NOT NULL,
         password_enc TEXT NOT NULL,
@@ -61,6 +70,7 @@ _SCHEMA: list[str] = [
     )
     """,
     "CREATE UNIQUE INDEX IF NOT EXISTS idx_accounts_login_hash ON accounts(login_hash)",
+    "CREATE UNIQUE INDEX IF NOT EXISTS idx_accounts_display_id ON accounts(display_id)",
     "CREATE INDEX IF NOT EXISTS idx_accounts_seller_status ON accounts(seller_id, status)",
     "CREATE INDEX IF NOT EXISTS idx_accounts_mode_status ON accounts(mode, status)",
     """
@@ -74,6 +84,11 @@ _SCHEMA: list[str] = [
         penalty_ticks INTEGER NOT NULL DEFAULT 0,
         status TEXT NOT NULL DEFAULT 'checking',
         mode TEXT NOT NULL DEFAULT 'real',
+        payment_deadline TEXT,
+        payment_id TEXT,
+        cancel_requested_at TEXT,
+        seller_response TEXT,
+        seller_response_at TEXT,
         check_deadline TEXT NOT NULL,
         auto_complete_at TEXT NOT NULL,
         last_penalty_at TEXT,
@@ -100,6 +115,97 @@ _SCHEMA: list[str] = [
     )
     """,
     "CREATE INDEX IF NOT EXISTS idx_transactions_user ON transactions(user_id)",
+    """
+    CREATE TABLE IF NOT EXISTS payments (
+        id {{ID}},
+        order_id BIGINT REFERENCES orders(id) ON DELETE SET NULL,
+        user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        amount BIGINT NOT NULL,
+        payment_id TEXT UNIQUE,
+        provider TEXT NOT NULL DEFAULT 'hamyon',
+        card TEXT,
+        status TEXT NOT NULL DEFAULT 'pending',
+        created_at TEXT NOT NULL,
+        completed_at TEXT
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_payments_order ON payments(order_id)",
+    "CREATE INDEX IF NOT EXISTS idx_payments_payment_id ON payments(payment_id)",
+    """
+    CREATE TABLE IF NOT EXISTS seller_balances (
+        id {{ID}},
+        seller_id BIGINT NOT NULL UNIQUE REFERENCES users(id) ON DELETE CASCADE,
+        available_balance BIGINT NOT NULL DEFAULT 0,
+        frozen_balance BIGINT NOT NULL DEFAULT 0,
+        total_earned BIGINT NOT NULL DEFAULT 0,
+        updated_at TEXT NOT NULL
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS refunds (
+        id {{ID}},
+        order_id BIGINT NOT NULL REFERENCES orders(id) ON DELETE CASCADE,
+        payment_id TEXT,
+        buyer_id BIGINT NOT NULL REFERENCES users(id),
+        amount BIGINT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'completed',
+        reason TEXT,
+        created_at TEXT NOT NULL
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_refunds_order ON refunds(order_id)",
+    """
+    CREATE TABLE IF NOT EXISTS disputes (
+        id {{ID}},
+        order_id BIGINT NOT NULL UNIQUE REFERENCES orders(id) ON DELETE CASCADE,
+        buyer_id BIGINT NOT NULL REFERENCES users(id),
+        reason TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'pending',
+        seller_response TEXT,
+        seller_response_at TEXT,
+        auto_resolved INTEGER NOT NULL DEFAULT 0,
+        decision TEXT,
+        decision_reason TEXT,
+        created_at TEXT NOT NULL,
+        resolved_by BIGINT,
+        resolved_at TEXT
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_disputes_status ON disputes(status)",
+    """
+    CREATE TABLE IF NOT EXISTS dispute_evidence (
+        id {{ID}},
+        dispute_id BIGINT NOT NULL REFERENCES disputes(id) ON DELETE CASCADE,
+        sender_id BIGINT NOT NULL REFERENCES users(id),
+        evidence_type TEXT NOT NULL DEFAULT 'text',
+        content TEXT NOT NULL,
+        created_at TEXT NOT NULL
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_dispute_evidence_dispute ON dispute_evidence(dispute_id)",
+    """
+    CREATE TABLE IF NOT EXISTS notifications (
+        id {{ID}},
+        user_id BIGINT REFERENCES users(id) ON DELETE CASCADE,
+        type TEXT NOT NULL,
+        title TEXT,
+        message TEXT NOT NULL,
+        is_read INTEGER NOT NULL DEFAULT 0,
+        created_at TEXT NOT NULL
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_notifications_user ON notifications(user_id)",
+    """
+    CREATE TABLE IF NOT EXISTS seller_reviews (
+        id {{ID}},
+        order_id BIGINT UNIQUE REFERENCES orders(id) ON DELETE CASCADE,
+        seller_id BIGINT NOT NULL REFERENCES users(id),
+        buyer_id BIGINT NOT NULL REFERENCES users(id),
+        rating INTEGER NOT NULL CHECK(rating BETWEEN 1 AND 5),
+        comment TEXT,
+        created_at TEXT NOT NULL
+    )
+    """,
     """
     CREATE TABLE IF NOT EXISTS topups (
         id {{ID}},
@@ -130,19 +236,6 @@ _SCHEMA: list[str] = [
     """,
     "CREATE INDEX IF NOT EXISTS idx_withdrawals_status ON withdrawals(status)",
     """
-    CREATE TABLE IF NOT EXISTS disputes (
-        id {{ID}},
-        order_id BIGINT NOT NULL UNIQUE REFERENCES orders(id) ON DELETE CASCADE,
-        buyer_id BIGINT NOT NULL REFERENCES users(id),
-        reason TEXT NOT NULL,
-        status TEXT NOT NULL DEFAULT 'pending',
-        created_at TEXT NOT NULL,
-        resolved_by BIGINT,
-        resolved_at TEXT
-    )
-    """,
-    "CREATE INDEX IF NOT EXISTS idx_disputes_status ON disputes(status)",
-    """
     CREATE TABLE IF NOT EXISTS audit_logs (
         id {{ID}},
         actor_tg BIGINT,
@@ -165,21 +258,42 @@ _MIGRATIONS: dict[str, dict[str, str]] = {
     "users": {
         "lang": "TEXT",
         "is_verified": "INTEGER NOT NULL DEFAULT 0",
+        "phone_verified": "INTEGER NOT NULL DEFAULT 0",
+        "terms_accepted": "INTEGER NOT NULL DEFAULT 0",
+        "active_disputes": "INTEGER NOT NULL DEFAULT 0",
+        "failed_disputes": "INTEGER NOT NULL DEFAULT 0",
         "test_mode": "INTEGER NOT NULL DEFAULT 0",
         "test_balance": "BIGINT NOT NULL DEFAULT 0",
         "rating": "REAL NOT NULL DEFAULT 0",
         "rating_count": "INTEGER NOT NULL DEFAULT 0",
     },
     "accounts": {
+        "display_id": "INTEGER",
         "title": "TEXT NOT NULL DEFAULT ''",
         "description": "TEXT NOT NULL DEFAULT ''",
+        "photo_id": "TEXT",
+        "extra_info": "TEXT NOT NULL DEFAULT ''",
+        "verification_code": "TEXT",
+        "verification_status": "TEXT NOT NULL DEFAULT 'verified'",
         "mode": "TEXT NOT NULL DEFAULT 'real'",
         "is_approved": "INTEGER NOT NULL DEFAULT 1",
     },
     "orders": {
         "mode": "TEXT NOT NULL DEFAULT 'real'",
+        "payment_deadline": "TEXT",
+        "payment_id": "TEXT",
+        "cancel_requested_at": "TEXT",
+        "seller_response": "TEXT",
+        "seller_response_at": "TEXT",
         "reminder_5_sent": "INTEGER NOT NULL DEFAULT 0",
         "reminder_1_sent": "INTEGER NOT NULL DEFAULT 0",
+    },
+    "disputes": {
+        "seller_response": "TEXT",
+        "seller_response_at": "TEXT",
+        "auto_resolved": "INTEGER NOT NULL DEFAULT 0",
+        "decision": "TEXT",
+        "decision_reason": "TEXT",
     },
     "transactions": {
         "mode": "TEXT NOT NULL DEFAULT 'real'",
@@ -301,11 +415,11 @@ class Database:
         # Tables first, then column migrations, then indexes (indexes may
         # reference columns added by a migration).
         for statement in rendered:
-            if not statement.upper().startswith("CREATE INDEX"):
+            if "INDEX" not in statement.upper():
                 await self._run_ddl(statement)
         await self._apply_migrations()
         for statement in rendered:
-            if statement.upper().startswith("CREATE INDEX"):
+            if "INDEX" in statement.upper():
                 await self._run_ddl(statement)
         # Older databases may not have the unique reference index.
         await self._run_ddl(

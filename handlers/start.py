@@ -7,7 +7,17 @@ from aiogram.exceptions import TelegramBadRequest
 from aiogram.filters import Command, CommandStart
 from aiogram.types import CallbackQuery, Message
 
-from config import COMMISSION_PERCENT, DEFAULT_LANG, SUPPORT_USERNAME, SUPPORTED_LANGS
+from config import (
+    AUTO_COMPLETE_MINUTES,
+    CHECK_MINUTES,
+    COMMISSION_PERCENT,
+    DEFAULT_LANG,
+    PENALTY_INTERVAL_MINUTES,
+    PENALTY_PERCENT,
+    SELLER_SHARE_PERCENT,
+    SUPPORT_USERNAME,
+    SUPPORTED_LANGS,
+)
 from handlers.helpers import is_admin_user
 from keyboards.inline import language_keyboard
 from keyboards.reply import main_menu_reply
@@ -65,6 +75,18 @@ async def choose_language(callback: CallbackQuery, user: dict) -> None:
             await callback.message.delete()
         except TelegramBadRequest:
             pass
+        await callback.message.answer(
+            t(
+                new_lang,
+                "start.rules",
+                commission=COMMISSION_PERCENT,
+                share=SELLER_SHARE_PERCENT,
+                check=CHECK_MINUTES,
+                interval=PENALTY_INTERVAL_MINUTES,
+                penalty=PENALTY_PERCENT,
+                auto=AUTO_COMPLETE_MINUTES,
+            )
+        )
         await callback.message.answer(
             t(new_lang, "menu.title"),
             reply_markup=main_menu_reply(

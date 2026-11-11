@@ -3,14 +3,21 @@
 from aiogram.fsm.state import State, StatesGroup
 
 
+class RegistrationFlow(StatesGroup):
+    phone = State()
+
+
 class SellerFlow(StatesGroup):
     phone = State()
     title = State()
     description = State()
+    price = State()
+    photo = State()
+    extra_info = State()
     login = State()
     password = State()
-    price = State()
     confirm = State()
+    verify_ownership = State()
 
 
 class PriceEdit(StatesGroup):
@@ -19,6 +26,7 @@ class PriceEdit(StatesGroup):
 
 class DisputeFlow(StatesGroup):
     reason = State()
+    evidence = State()
 
 
 class TopupFlow(StatesGroup):

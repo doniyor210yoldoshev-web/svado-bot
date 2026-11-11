@@ -15,16 +15,22 @@ logger = logging.getLogger(__name__)
 
 MENU_ACTIONS = {
     "menu.browse": "browse",
+    "menu.sell": "sell",
     "menu.search": "search",
+    "menu.my_accounts": "my_accounts",
+    "menu.my_orders": "my_orders",
     "menu.wallet": "wallet",
-    "menu.purchases": "purchases",
-    "menu.profile": "profile",
+    "menu.history": "history",
     "menu.settings": "settings",
-    "menu.rules": "rules",
-    "menu.support": "support",
-    "menu.seller_panel": "seller",
-    "menu.become_seller": "become_seller",
+    "menu.help": "help",
     "menu.admin": "admin",
+    # Aliases
+    "menu.seller_panel": "my_accounts",
+    "menu.become_seller": "sell",
+    "menu.purchases": "my_orders",
+    "menu.rules": "help",
+    "menu.support": "help",
+    "menu.profile": "settings",
 }
 
 

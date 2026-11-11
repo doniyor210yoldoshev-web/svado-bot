@@ -195,3 +195,23 @@ async def balance_changed(bot: Bot, user: dict, amount: int, new_balance: int) -
         amount=fmt_sum(amount),
         balance=fmt_sum(new_balance),
     )
+
+
+async def notify_admin_event(bot: Bot, event_type: str, **kwargs) -> None:
+    """Informational admin alerts (Section 15: strictly informational, no dispute actions)."""
+    messages = {
+        "new_user": "👤 <b>[ADMIN] Yangi foydalanuvchi:</b> {name} (ID: <code>{tg_id}</code>, Tel: {phone})",
+        "new_seller": "🧑‍💼 <b>[ADMIN] Yangi sotuvchi:</b> {name} (ID: <code>{tg_id}</code>, Kod: <b>{code}</b>)",
+        "new_listing": "📦 <b>[ADMIN] Yangi e'lon:</b> #{id} - <b>{title}</b> (Narxi: {price})",
+        "new_order": "🧾 <b>[ADMIN] Yangi buyurtma yaratildi:</b> #{id} (Akkaunt: #{account_id}, Narx: {price})",
+        "payment_confirmed": "💰 <b>[ADMIN] To'lov tasdiqlandi:</b> Buyurtma #{order_id} (Summa: {amount})",
+        "trade_completed": "✅ <b>[ADMIN] Savdo muvaffaqiyatli yakunlandi:</b> #{order_id} (Sotuvchiga: {share}, Komissiya: {commission})",
+        "fraud_alert": "⚠️ <b>[ADMIN OGOHLANTIRISH] Firibgarlik / Nizo:</b> #{order_id}\nSabab: {reason}\nQaror: {decision}",
+        "order_cancelled": "ℹ️ <b>[ADMIN] Buyurtma bekor qilindi (5 daqiqa vaqt tugadi):</b> #{order_id}",
+    }
+    template = messages.get(event_type)
+    if not template:
+        return
+    text = template.format(**kwargs)
+    for admin_tg, _ in await users_service.admin_langs():
+        await send(bot, admin_tg, text)

@@ -134,7 +134,7 @@ async def create_payment(order_id: int, amount: int) -> dict:
         message = str(body.get("error") or body.get("message") or "error")
         logger.error("HamyonAPI to'lov yaratish xatosi: %s", message)
         raise ServiceError(
-            "To'lovni yaratib bo'lmadi. Keyinroq urinib ko'ring."
+            f"To'lovni yaratib bo'lmadi: {message}"
         )
     card = _extract_card(body)
     if not card:
@@ -248,6 +248,68 @@ async def handle_callback(data: dict[str, str]) -> dict:
 
 
 async def _handle_paid(payment_id: str, order_id: int | None, data: dict[str, str]) -> None:
+    # 1. Check if this is an escrow account order
+    from database.db import db
+    from services import marketplace
+    order = None
+    if order_id is not None:
+        order = await db.fetchone(
+            "SELECT * FROM orders WHERE id = ? AND status = 'pending_payment'",
+            (order_id,),
+        )
+    if order is None and payment_id:
+        order = await db.fetchone(
+            "SELECT * FROM orders WHERE payment_id = ? AND status = 'pending_payment'",
+            (payment_id,),
+        )
+
+    if order is not None:
+        if not _amount_matches(data.get("amount"), int(order["price"])):
+            logger.error(
+                "Hamyon paid (Order): summa mos emas (order=%s, expected=%s, got=%s)",
+                order["id"],
+                order["price"],
+                data.get("amount"),
+            )
+            return
+        info = await marketplace.confirm_escrow_payment(order["id"], payment_id)
+        if _bot is not None and info.get("buyer") and info.get("account"):
+            from config import CHECK_MINUTES, PENALTY_INTERVAL_MINUTES, PENALTY_PERCENT
+            login, pwd, extra = await marketplace.get_credentials(order["id"], order["buyer_id"])
+            await notifications.notify(
+                _bot,
+                info["buyer"]["tg_id"],
+                info["buyer"]["lang"],
+                "shop.purchased",
+                title=info["account"]["title"],
+                login=login,
+                password=pwd,
+                price=fmt_sum(order["price"]),
+                deadline=fmt_dt(info["order"]["check_deadline"]),
+                minutes=CHECK_MINUTES,
+                interval=PENALTY_INTERVAL_MINUTES,
+                penalty=PENALTY_PERCENT,
+            )
+            await notifications.notify(
+                _bot,
+                info["seller"]["tg_id"],
+                info["seller"]["lang"],
+                "notify.seller_sold",
+                title=info["account"]["title"],
+                price=fmt_sum(order["price"]),
+                order=order["id"],
+                share=93,
+            )
+            await notifications.notify_admin_event(
+                _bot,
+                "payment_confirmed",
+                order_id=order["id"],
+                amount=fmt_sum(order["price"]),
+            )
+        logger.info("Hamyon paid (Order): order=%s payment_id=%s", order["id"], payment_id)
+        return
+
+    # 2. Check if this is a wallet topup
     topup = await payment.get_hamyon_topup(payment_id=payment_id, order_id=order_id)
     if topup is None:
         logger.warning(
@@ -273,6 +335,37 @@ async def _handle_paid(payment_id: str, order_id: int | None, data: dict[str, st
 
 
 async def _handle_cancel(payment_id: str, order_id: int | None, reason: str) -> None:
+    from database.db import db
+    from services import marketplace
+    order = None
+    if order_id is not None:
+        order = await db.fetchone(
+            "SELECT * FROM orders WHERE id = ? AND status = 'pending_payment'",
+            (order_id,),
+        )
+    if order is None and payment_id:
+        order = await db.fetchone(
+            "SELECT * FROM orders WHERE payment_id = ? AND status = 'pending_payment'",
+            (payment_id,),
+        )
+    if order is not None:
+        cancelled = await marketplace.cancel_expired_order(order["id"])
+        if _bot is not None and cancelled and cancelled.get("buyer"):
+            await notifications.notify(
+                _bot,
+                cancelled["buyer"]["tg_id"],
+                cancelled["buyer"]["lang"],
+                "shop.order_cancelled_timeout",
+                order=order["id"],
+            )
+            await notifications.notify_admin_event(
+                _bot,
+                "order_cancelled",
+                order_id=order["id"],
+            )
+        logger.info("Hamyon cancel (Order): order=%s payment_id=%s", order["id"], payment_id)
+        return
+
     topup = await payment.get_hamyon_topup(payment_id=payment_id, order_id=order_id)
     if topup is None:
         logger.info(

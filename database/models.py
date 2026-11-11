@@ -13,17 +13,20 @@ class Lang(StrEnum):
 
 class AccountStatus(StrEnum):
     ACTIVE = "active"
+    RESERVED = "reserved"
     PAUSED = "paused"
     SOLD = "sold"
     REFUNDED = "refunded"
 
 
 class OrderStatus(StrEnum):
+    PENDING_PAYMENT = "pending_payment"
     CHECKING = "checking"
     COMPLETED = "completed"
     AUTO_COMPLETED = "auto_completed"
     DISPUTED = "disputed"
     REFUNDED = "refunded"
+    CANCELLED = "cancelled"
 
 
 class RequestStatus(StrEnum):
@@ -36,6 +39,7 @@ class DisputeStatus(StrEnum):
     PENDING = "pending"
     REFUNDED = "refunded"
     RELEASED = "released"
+    LOCKED_HOLD = "locked_hold"
 
 
 class Mode(StrEnum):
