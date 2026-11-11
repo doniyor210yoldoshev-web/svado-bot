@@ -51,6 +51,7 @@ Birinchi ishga tushirishda `data/` papkasi va SQLite bazasi avtomatik yaratiladi
 | `FSM_DB_PATH` | FSM SQLite fayli | `data/fsm.db` |
 | `FERNET_KEY` | Login/parol shifrlash kaliti | avtomatik |
 | `PAYMENT_CARD` / `PAYMENT_HOLDER` | To'lov kartasi ma'lumotlari | — |
+| `HAMYON_API_URL` / `HAMYON_SHOP_ID` / `HAMYON_SHOP_KEY` | HamyonAPI sozlamalari (@HamyonAPIBot dan) | `https://hamyon-api.uz` / — |
 | `SUPPORT_USERNAME` | Yordam uchun username (@siz) | `""` |
 | `DEFAULT_LANG` | `uz`, `ru`, `en` | `uz` |
 | `COMMISSION_PERCENT` | Komissiya foizi | `8` |
@@ -82,6 +83,32 @@ Imzo (MD5 `sign_string`) har bir so'rovda tekshiriladi; `complete`da Click xatos
 (`error < 0`) bo'lsa to'lov bekor qilinadi. Click to'lovlari admin panelning
 "To'lovlar" ro'yxatida ko'rinmaydi (ular avtomatik tasdiqlanadi).
 
+## HamyonAPI (hamyon-api.uz) to'lovini ulash
+
+1. Telegram'da [@HamyonAPIBot](https://t.me/HamyonAPIBot) ga `/start` yuboring va
+   olingan `shop_id` va `shop_key` ni `.env` ga yozing.
+2. Kartangiz xabarnomalarini ulang: HUMO uchun [@HumoCardBot](https://t.me/HumoCardBot),
+   UZCARD uchun [@CardXabarBot](https://t.me/CardXabarBot).
+3. HamyonAPI paneli (bot ichidagi WebApp) yoki bot sozlamalarida callback URL
+   larini kiriting (domeningiz bilan):
+   - **Prepare URL**: `https://<domen>/hamyon/prepare`
+   - **Complete URL**: `https://<domen>/hamyon/complete`
+4. `.env` faylida `PAYMENT_PROVIDER=hamyon` qilib, `HAMYON_SHOP_ID` va
+   `HAMYON_SHOP_KEY` ni to'ldiring. `PUBLIC_BASE_URL` ga ochiq HTTPS manzilni
+   yozing. Server `PORT` muhit o'zgaruvchisida ishlashi kerak.
+5. To'lov oqimi: botda summa kiritiladi -> HamyonAPI dan karta raqami olinadi ->
+   mijoz xuddi shu kartaga summani o'tkazadi -> pul tushishi bilan (5–30 s)
+   balans avtomatik to'ladi va foydalanuvchiga xabar boradi.
+
+Imzo har bir callbackda tekshiriladi: `md5(shop_id + payment_id + amount +
+shop_key)`. Callbacklar bir necha marta qayta yuborilishi mumkin, shuning uchun
+balans `payment_id` bo'yicha bir marta (idempotent) to'ldiriladi. To'lov 5 daqiqa
+ichida tushmasa avtomatik `cancel` keladi. Bir do'konda bir vaqtda bir xil
+summadagi ikkita ochiq to'lov bo'lishi mumkin emas — shuning uchun summa
+zarur bo'lsa 1–2 so'mga o'zgartiriladi (mijozga ko'rsatilgan summa o'sha).
+HamyonAPI to'lovlari admin panelning "To'lovlar" ro'yxatida ko'rinmaydi (ular
+avtomatik tasdiqlanadi).
+
 ## Render'ga deploy qilish
 
 1. Render'da **PostgreSQL** yarating va `DATABASE_URL` ni oling.
@@ -112,8 +139,9 @@ python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().d
    foydalanuvchilar, broadcast, audit, test rejimi.
 
 Test rejimini yoqish uchun admin panel → **Test rejimi**. Yoqilganda foydalanuvchiga test
-balansi beriladi va tizim sotuvchisi (`tg_id = -1`) tomonidan 5 ta test akkaunti
-qo'shiladi (narxi 10 000 so'm, login `test_<hex>`, parol `password123`).
+balansi beriladi va tizim sotuvchisi (`tg_id = -1`) tomonidan 10 ta arzon test akkaunti
+avtomatik qo'shiladi (narxi 1 000 so'm, login `test_<hex>`, parol `password123`).
+"Test akkauntlar yaratish" tugmasi bilan qo'shimcha qo'shish mumkin.
 
 ## Loyiha tuzilishi
 

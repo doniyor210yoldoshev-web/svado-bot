@@ -22,6 +22,7 @@ from aiogram import Bot
 
 from database.db import db
 from services import click as click_service
+from services import hamyon as hamyon_service
 
 logger = logging.getLogger(__name__)
 
@@ -99,6 +100,7 @@ async def start_health_server(bot: Bot | None = None) -> asyncio.AbstractServer 
 
     if bot is not None:
         click_service.set_bot(bot)
+        hamyon_service.set_bot(bot)
 
     started_at = time.monotonic()
 
@@ -128,6 +130,25 @@ async def start_health_server(bot: Bot | None = None) -> asyncio.AbstractServer 
                             "error": -8,
                             "error_note": "Error in request from click",
                         }
+                    response = _response(
+                        "200 OK",
+                        "application/json",
+                        json.dumps(result).encode("utf-8"),
+                    )
+            elif path in ("/hamyon/prepare", "/hamyon/complete", "/hamyon"):
+                if method != "POST":
+                    response = _response(
+                        "405 Method Not Allowed",
+                        "text/plain",
+                        b"Method Not Allowed",
+                    )
+                else:
+                    data = _parse_body(headers, body)
+                    try:
+                        result = await hamyon_service.handle_callback(data)
+                    except Exception:
+                        logger.exception("Hamyon callback'da xatolik")
+                        result = {"ok": False}
                     response = _response(
                         "200 OK",
                         "application/json",

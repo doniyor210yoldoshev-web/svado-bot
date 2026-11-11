@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import math
+import secrets
 from datetime import timedelta
 
 from config import (
@@ -15,9 +16,11 @@ from config import (
     PENALTY_INTERVAL_MINUTES,
     PENALTY_PERCENT,
     SELLER_SHARE_PERCENT,
+    TEST_MAX_ACCOUNTS,
 )
 from database.db import db
 from services import security
+from services import users as users_service
 from services.errors import InsufficientFunds, ServiceError
 from utils import fmt_sum, parse_dt, utcnow, utcnow_iso
 
@@ -105,6 +108,61 @@ async def list_seller_accounts(seller_id: int, include_sold: bool = True) -> lis
         "SELECT * FROM accounts WHERE seller_id = ? AND status = 'active' ORDER BY id DESC",
         (seller_id,),
     )
+
+
+# --------------------------------------------------------------------------
+# Test accounts
+# --------------------------------------------------------------------------
+TEST_SELLER_TG_ID = -1
+TEST_SELLER_PHONE = "+998000000000"
+TEST_SELLER_PASSWORD = "password123"
+
+TEST_ACCOUNT_TEMPLATES: tuple[tuple[str, str, int], ...] = (
+    ("Instagram • 5 000 obunachi", "2019-yilda ochilgan, faol auditoriya, blok yo'q.", 1_000),
+    ("Telegram kanal • 2 000 a'zo", "O'zbek tilidagi yangiliklar kanali, admin panel bilan.", 1_000),
+    ("TikTok • 10 000 kuzatuvchi", "TikTok akkaunti, original video joylash uchun tayyor.", 1_000),
+    ("Gmail • yangi pochta", "Yangi ochilgan Gmail, barcha xavfsizlik sozlamalari yoqilgan.", 1_000),
+    ("Facebook • 2018 akkaunt", "Uzoq yillik akkaunt, do'stlar ro'yxati mavjud.", 1_000),
+    ("YouTube • 1 000 obunachi", "Monetizatsiya talablariga yaqin kanal.", 1_000),
+    ("Discord • Nitro akkaunt", "To'liq profilli Discord, serverlar uchun tayyor.", 1_000),
+    ("X (Twitter) • 500 kuzatuvchi", "Tweetlar tarixi toza, faol akkaunt.", 1_000),
+    ("Steam • o'yinlar bilan", "Bir nechta o'yin va balans mavjud akkaunt.", 1_000),
+    ("Netflix • 1 oylik", "Premium rejasi faol, 4 ta qurilmada ishlaydi.", 1_000),
+)
+
+
+async def seed_test_accounts(max_accounts: int = TEST_MAX_ACCOUNTS) -> int:
+    """Ensure the system test seller exists with up to ``max_accounts`` test accounts.
+
+    Returns the number of accounts created. Safe to call repeatedly — existing
+    test accounts are counted and only the missing ones are added.
+    """
+    system = await users_service.ensure_user(
+        TEST_SELLER_TG_ID, "Test Sotuvchi", "test_seller"
+    )
+    if not system["is_seller"]:
+        system = await users_service.register_seller(system["id"], TEST_SELLER_PHONE)
+    existing = sum(
+        1 for account in await list_seller_accounts(system["id"]) if account["mode"] == "test"
+    )
+    remaining = max(0, max_accounts - existing)
+    created = 0
+    for offset in range(remaining):
+        title, description, price = TEST_ACCOUNT_TEMPLATES[
+            (existing + offset) % len(TEST_ACCOUNT_TEMPLATES)
+        ]
+        login = f"test_{secrets.token_hex(4)}"
+        await create_account(
+            system["id"],
+            title,
+            description,
+            login,
+            TEST_SELLER_PASSWORD,
+            price,
+            "test",
+        )
+        created += 1
+    return created
 
 
 async def delete_account(account_id: int, seller_id: int) -> None:

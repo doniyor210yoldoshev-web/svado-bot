@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import secrets
 from collections.abc import Awaitable, Callable
 from typing import Any
 
@@ -666,20 +665,6 @@ async def broadcast_send(
 # --------------------------------------------------------------------------
 # Test mode
 # --------------------------------------------------------------------------
-_TEST_ACCOUNT_TEMPLATES: tuple[tuple[str, str, int], ...] = (
-    ("Instagram • 5 000 obunachi", "2019-yilda ochilgan, faol auditoriya, blok yo'q.", 45_000),
-    ("Telegram kanal • 2 000 a'zo", "O'zbek tilidagi yangiliklar kanali, admin panel bilan.", 25_000),
-    ("TikTok • 10 000 kuzatuvchi", "TikTok akkaunti, original video joylash uchun tayyor.", 60_000),
-    ("Gmail • yangi pochta", "Yangi ochilgan Gmail, barcha xavfsizlik sozlamalari yoqilgan.", 8_000),
-    ("Facebook • 2018 akkaunt", "Uzoq yillik akkaunt, do'stlar ro'yxati mavjud.", 30_000),
-    ("YouTube • 1 000 obunachi", "Monetizatsiya talablariga yaqin kanal.", 55_000),
-    ("Discord • Nitro akkaunt", "To'liq profilli Discord, serverlar uchun tayyor.", 18_000),
-    ("X (Twitter) • 500 kuzatuvchi", "Tweetlar tarixi toza, faol akkaunt.", 22_000),
-    ("Steam • o'yinlar bilan", "Bir nechta o'yin va balans mavjud akkaunt.", 40_000),
-    ("Netflix • 1 oylik", "Premium rejasi faol, 4 ta qurilmada ishlaydi.", 12_000),
-)
-
-
 async def _render_test(
     event: Message | CallbackQuery, target: dict, lang: str
 ) -> None:
@@ -703,37 +688,23 @@ async def test_panel(callback: CallbackQuery, user: dict, lang: str) -> None:
 @router.callback_query(F.data == "admin:test:toggle")
 async def test_toggle(callback: CallbackQuery, user: dict, lang: str) -> None:
     updated = await users_service.toggle_test_mode(user["id"], TEST_INITIAL_BALANCE)
-    key = "admin.test_on_msg" if updated["test_mode"] else "admin.test_off_msg"
-    await callback.answer(
-        t(lang, key, balance=fmt_sum(updated["test_balance"])), show_alert=True
-    )
+    if updated["test_mode"]:
+        seeded = await marketplace.seed_test_accounts(TEST_MAX_ACCOUNTS)
+        key = "admin.test_on_msg"
+        await callback.answer(
+            t(lang, key, balance=fmt_sum(updated["test_balance"])),
+            show_alert=True,
+        )
+        if seeded:
+            await callback.message.answer(t(lang, "admin.test_seeded", count=seeded))
+    else:
+        await callback.answer(t(lang, "admin.test_off_msg"), show_alert=True)
     await _render_test(callback, updated, lang)
 
 
 @router.callback_query(F.data == "admin:test:seed")
 async def test_seed(callback: CallbackQuery, user: dict, lang: str) -> None:
-    system = await users_service.ensure_user(-1, "Test Sotuvchi", "test_seller")
-    if not system["is_seller"]:
-        system = await users_service.register_seller(system["id"], "+998000000000")
-    existing_accounts = await marketplace.list_seller_accounts(system["id"])
-    existing = sum(1 for account in existing_accounts if account["mode"] == "test")
-    remaining = max(0, TEST_MAX_ACCOUNTS - existing)
-    created = 0
-    for offset in range(remaining):
-        title, description, price = _TEST_ACCOUNT_TEMPLATES[
-            (existing + offset) % len(_TEST_ACCOUNT_TEMPLATES)
-        ]
-        login = f"test_{secrets.token_hex(4)}"
-        await marketplace.create_account(
-            system["id"],
-            title,
-            description,
-            login,
-            "password123",
-            price,
-            "test",
-        )
-        created += 1
+    created = await marketplace.seed_test_accounts(TEST_MAX_ACCOUNTS)
     await callback.answer(
         t(lang, "admin.test_seeded", count=created), show_alert=True
     )

@@ -73,6 +73,18 @@ def click_payment_keyboard(lang: str, url: str) -> InlineKeyboardMarkup:
     )
 
 
+def hamyon_payment_keyboard(lang: str, topup_id: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                _b(t(lang, "wallet.hamyon_check"), f"hamyon:check:{topup_id}"),
+                _b(t(lang, "wallet.hamyon_cancel"), f"hamyon:cancel:{topup_id}"),
+            ],
+            [_b(t(lang, "common.back"), "menu:wallet")],
+        ]
+    )
+
+
 def _pagination(
     kb: InlineKeyboardBuilder, lang: str, prefix: str, page: int, total_pages: int
 ) -> None:

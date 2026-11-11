@@ -184,6 +184,146 @@ async def complete_click_topup(
         return info
 
 
+# --------------------------------------------------------------------------
+# HamyonAPI top-ups
+# --------------------------------------------------------------------------
+async def _unique_hamyon_amount(amount: int) -> int:
+    """HamyonAPI allows only one open payment per amount per shop.
+
+    When a collision happens the amount is nudged by 1 so'm (the official
+    recommendation) until a free value is found.
+    """
+    candidate = amount
+    for _ in range(50):
+        row = await db.fetchone(
+            "SELECT id FROM topups "
+            "WHERE receipt_type = 'hamyon' AND status = 'pending' "
+            "AND mode = 'real' AND amount = ?",
+            (candidate,),
+        )
+        if row is None:
+            return candidate
+        candidate += 1
+    raise ServiceError(
+        "Hozir juda ko'p to'lov kutilmoqda. Bir necha daqiqadan keyin urinib ko'ring."
+    )
+
+
+async def create_hamyon_topup(user_id: int, amount: int) -> dict:
+    """Create a pending top-up that will be confirmed by HamyonAPI's callback.
+
+    The amount may be nudged up by a few so'm when another open payment uses
+    the same amount — HamyonAPI detects payments by amount.
+    """
+    if amount < MIN_TOPUP or amount > MAX_TOPUP:
+        raise ServiceError(
+            f"To'ldirish miqdori {fmt_sum(MIN_TOPUP)} va {fmt_sum(MAX_TOPUP)} orasida bo'lishi kerak"
+        )
+    unique_amount = await _unique_hamyon_amount(amount)
+    topup_id = await db.insert(
+        "INSERT INTO topups "
+        "(user_id, amount, receipt_type, receipt_value, status, mode, created_at) "
+        "VALUES (?, ?, 'hamyon', '', 'pending', 'real', ?)",
+        (user_id, unique_amount, utcnow_iso()),
+    )
+    row = await db.fetchone("SELECT * FROM topups WHERE id = ?", (topup_id,))
+    if row is None:
+        raise ServiceError("To'lov yaratib bo'lmadi. Keyinroq urinib ko'ring.")
+    return row
+
+
+async def get_hamyon_topup(payment_id: str, order_id: int | None = None) -> dict | None:
+    """Find a HamyonAPI top-up by payment_id or our order_id (any status)."""
+    base_query = (
+        "SELECT t.*, u.tg_id AS user_tg, u.full_name AS user_name, u.lang AS user_lang "
+        "FROM topups t JOIN users u ON u.id = t.user_id "
+        "WHERE t.receipt_type = 'hamyon'"
+    )
+    if payment_id:
+        row = await db.fetchone(
+            base_query + " AND t.receipt_value = ?",
+            (payment_id,),
+        )
+        if row is not None:
+            return row
+    if order_id is not None:
+        row = await db.fetchone(
+            base_query + " AND t.id = ?",
+            (order_id,),
+        )
+        if row is not None:
+            return row
+    return None
+
+
+async def mark_hamyon_created(topup_id: int, payment_id: str) -> None:
+    await db.execute(
+        "UPDATE topups SET receipt_value = ? WHERE id = ? AND status = 'pending'",
+        ((payment_id or "")[:200], topup_id),
+    )
+
+
+async def cancel_hamyon_topup(topup_id: int, payment_id: str = "") -> None:
+    await db.execute(
+        "UPDATE topups SET status = 'rejected', reviewed_by = 0, reviewed_at = ?, "
+        "receipt_value = ? WHERE id = ? AND status = 'pending'",
+        (utcnow_iso(), (payment_id or "")[:200], topup_id),
+    )
+
+
+async def complete_hamyon_topup(topup_id: int, payment_id: str = "") -> dict | None:
+    """Credit the user's wallet once. Returns None for unknown/foreign top-ups."""
+    async with db.transaction() as ex:
+        topup = await ex.fetchone("SELECT * FROM topups WHERE id = ?", (topup_id,))
+        if topup is None or topup["receipt_type"] != "hamyon":
+            return None
+        user = await ex.fetchone(
+            "SELECT tg_id, lang FROM users WHERE id = ?", (topup["user_id"],)
+        )
+        info = {
+            "topup_id": topup_id,
+            "amount": int(topup["amount"]),
+            "user_tg": user["tg_id"] if user else None,
+            "user_lang": user["lang"] if user else None,
+        }
+        if topup["status"] == "approved":
+            info["already"] = True
+            return info
+        if topup["status"] != "pending":
+            return None
+
+        updated = await ex.execute(
+            "UPDATE topups SET status = 'approved', reviewed_by = 0, reviewed_at = ?, "
+            "receipt_value = ? WHERE id = ? AND status = 'pending'",
+            (
+                utcnow_iso(),
+                (payment_id or topup["receipt_value"] or "hamyon")[:200],
+                topup_id,
+            ),
+        )
+        if updated == 0:
+            info["already"] = True
+            return info
+
+        await ex.execute(
+            "UPDATE users SET balance = balance + ? WHERE id = ?",
+            (int(topup["amount"]), topup["user_id"]),
+        )
+        await ex.execute(
+            "INSERT INTO transactions "
+            "(user_id, amount, type, mode, reference, description, created_at) "
+            "VALUES (?, ?, 'topup', 'real', ?, ?, ?)",
+            (
+                topup["user_id"],
+                int(topup["amount"]),
+                f"topup:{topup_id}",
+                f"HamyonAPI to'lov #{topup_id} (payment_id: {payment_id})"[:500],
+                utcnow_iso(),
+            ),
+        )
+        return info
+
+
 async def list_user_topups(user_id: int, limit: int = 10) -> list[dict]:
     return await db.fetchall(
         "SELECT * FROM topups WHERE user_id = ? ORDER BY id DESC LIMIT ?",
@@ -196,7 +336,7 @@ async def list_pending_topups(limit: int = 10) -> list[dict]:
         "SELECT t.*, u.tg_id AS user_tg, u.full_name AS user_name, "
         "u.seller_code AS seller_code, u.username AS username, u.lang AS user_lang "
         "FROM topups t JOIN users u ON u.id = t.user_id "
-        "WHERE t.status = 'pending' AND t.receipt_type != 'click' "
+        "WHERE t.status = 'pending' AND t.receipt_type NOT IN ('click', 'hamyon') "
         "ORDER BY t.id ASC LIMIT ?",
         (limit,),
     )

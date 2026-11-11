@@ -47,6 +47,7 @@ if DEFAULT_LANG not in SUPPORTED_LANGS:
 # --- Payments -------------------------------------------------------------
 # manual -> card transfer verified by an admin (default)
 # click  -> Click (click.uz) SHOP API with prepare/complete callbacks
+# hamyon -> HamyonAPI (hamyon-api.uz) HUMO/UZCARD transfers with callbacks
 PAYMENT_PROVIDER = os.getenv("PAYMENT_PROVIDER", "manual").strip().lower()
 PAYMENT_CARD = os.getenv("PAYMENT_CARD", "8600 0000 0000 0000").strip()
 PAYMENT_HOLDER = os.getenv("PAYMENT_HOLDER", "Marketplace Admin").strip()
@@ -61,6 +62,13 @@ CLICK_SECRET_KEY = os.getenv("CLICK_SECRET_KEY", "").strip()
 CLICK_PAY_URL = os.getenv("CLICK_PAY_URL", "https://my.click.uz/services/pay").strip()
 # Public HTTPS base URL of the deployed service (e.g. Render), used in docs.
 PUBLIC_BASE_URL = os.getenv("PUBLIC_BASE_URL", "").strip().rstrip("/")
+
+# --- HamyonAPI (hamyon-api.uz) --------------------------------------------
+# shop_id / shop_key are issued by @HamyonAPIBot in Telegram. Needed when
+# PAYMENT_PROVIDER=hamyon. Cards are linked via @HumoCardBot / @CardXabarBot.
+HAMYON_API_URL = os.getenv("HAMYON_API_URL", "https://hamyon-api.uz").strip().rstrip("/")
+HAMYON_SHOP_ID = os.getenv("HAMYON_SHOP_ID", "").strip()
+HAMYON_SHOP_KEY = os.getenv("HAMYON_SHOP_KEY", "").strip()
 
 # --- Business rules -------------------------------------------------------
 COMMISSION_PERCENT = int(os.getenv("COMMISSION_PERCENT", "8"))

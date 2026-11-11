@@ -16,9 +16,14 @@ from config import (
 )
 from handlers.helpers import is_admin_user, respond
 from handlers.views import render_wallet
-from keyboards.inline import back_keyboard, click_payment_keyboard
+from keyboards.inline import (
+    back_keyboard,
+    click_payment_keyboard,
+    hamyon_payment_keyboard,
+)
 from keyboards.reply import cancel_reply, main_menu_reply
 from services import click as click_service
+from services import hamyon as hamyon_service
 from services import notifications, payment
 from services.errors import ServiceError
 from services.i18n import t
@@ -85,6 +90,35 @@ async def topup_amount(
         )
         return
 
+    if PAYMENT_PROVIDER == "hamyon":
+        if not hamyon_service.is_configured():
+            await state.clear()
+            await message.answer(t(lang, "wallet.hamyon_unavailable"))
+            return
+        topup = None
+        try:
+            topup = await payment.create_hamyon_topup(user["id"], amount)
+            created = await hamyon_service.create_payment(
+                int(topup["id"]), int(topup["amount"])
+            )
+        except ServiceError as exc:
+            if topup is not None:
+                await payment.cancel_hamyon_topup(int(topup["id"]))
+            await message.answer(str(exc))
+            return
+        await payment.mark_hamyon_created(int(topup["id"]), created["payment_id"])
+        await state.clear()
+        await message.answer(
+            t(
+                lang,
+                "wallet.hamyon_title",
+                amount=fmt_sum(topup["amount"]),
+                card=created["card"],
+            ),
+            reply_markup=hamyon_payment_keyboard(lang, int(topup["id"])),
+        )
+        return
+
     await state.update_data(amount=amount)
     await state.set_state(TopupFlow.receipt)
     await message.answer(
@@ -97,6 +131,78 @@ async def topup_amount(
         ),
         reply_markup=cancel_reply(lang),
     )
+
+
+async def _hamyon_topup_or_answer(
+    callback: CallbackQuery, topup_id: int, lang: str
+) -> dict | None:
+    topup = await payment.get_hamyon_topup(payment_id="", order_id=topup_id)
+    if topup is None:
+        await callback.answer(t(lang, "wallet.hamyon_not_found"), show_alert=True)
+    return topup
+
+
+@router.callback_query(F.data.startswith("hamyon:check:"))
+async def hamyon_check(callback: CallbackQuery, user: dict, lang: str) -> None:
+    topup_id = int(str(callback.data).split(":", 2)[2])
+    topup = await _hamyon_topup_or_answer(callback, topup_id, lang)
+    if topup is None:
+        return
+    payment_id = str(topup.get("receipt_value") or "").strip()
+    if not payment_id:
+        await callback.answer(t(lang, "wallet.hamyon_pending"), show_alert=True)
+        return
+    if topup["status"] == "approved":
+        await callback.answer(t(lang, "wallet.hamyon_paid"), show_alert=True)
+        return
+    if topup["status"] != "pending":
+        await callback.answer(t(lang, "wallet.hamyon_canceled"), show_alert=True)
+        return
+    try:
+        status = await hamyon_service.check_status(payment_id)
+    except ServiceError as exc:
+        await callback.answer(str(exc), show_alert=True)
+        return
+    state = str(status.get("status") or status.get("state") or "").strip().lower()
+    if state == "paid":
+        info = await payment.complete_hamyon_topup(topup_id, payment_id)
+        if info is not None and not info.get("already"):
+            bot = callback.bot
+            if bot is not None:
+                await notifications.notify(
+                    bot,
+                    info["user_tg"],
+                    info.get("user_lang"),
+                    "wallet.topup_approved",
+                    amount=fmt_sum(info["amount"]),
+                )
+        await callback.answer(t(lang, "wallet.hamyon_paid"), show_alert=True)
+        return
+    if state in ("cancel", "cancelled", "canceled"):
+        await payment.cancel_hamyon_topup(topup_id, payment_id)
+        await callback.answer(t(lang, "wallet.hamyon_canceled"), show_alert=True)
+        return
+    await callback.answer(t(lang, "wallet.hamyon_pending"), show_alert=True)
+
+
+@router.callback_query(F.data.startswith("hamyon:cancel:"))
+async def hamyon_cancel(callback: CallbackQuery, user: dict, lang: str) -> None:
+    topup_id = int(str(callback.data).split(":", 2)[2])
+    topup = await _hamyon_topup_or_answer(callback, topup_id, lang)
+    if topup is None:
+        return
+    if topup["status"] == "approved":
+        await callback.answer(t(lang, "wallet.hamyon_paid"), show_alert=True)
+        return
+    payment_id = str(topup.get("receipt_value") or "").strip()
+    if payment_id:
+        try:
+            await hamyon_service.cancel_payment(payment_id)
+        except ServiceError as exc:
+            await callback.answer(str(exc), show_alert=True)
+            return
+    await payment.cancel_hamyon_topup(topup_id, payment_id)
+    await callback.answer(t(lang, "wallet.hamyon_canceled"), show_alert=True)
 
 
 @router.message(StateFilter(TopupFlow.receipt))
