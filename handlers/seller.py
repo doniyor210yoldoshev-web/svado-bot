@@ -20,6 +20,7 @@ from keyboards.inline import (
     add_confirm_keyboard,
     back_keyboard,
     delete_confirm_keyboard,
+    ownership_keyboard,
     seller_account_keyboard,
 )
 from keyboards.reply import cancel_reply, main_menu_reply
@@ -67,18 +68,35 @@ async def register(
 
 @router.message(StateFilter(SellerFlow.phone), F.contact)
 async def phone_contact(
-    message: Message, user: dict, lang: str, state: FSMContext
+    message: Message, user: dict, lang: str, state: FSMContext, bot: Bot
 ) -> None:
+    if (
+        message.contact.user_id is not None
+        and message.contact.user_id != message.from_user.id
+    ):
+        await message.answer(t(lang, "seller.phone_not_owned"))
+        return
     phone = (message.contact.phone_number or "").strip()
     digits = "".join(ch for ch in phone if ch.isdigit())
     if len(digits) < 9:
         await message.answer(t(lang, "seller.phone_invalid"))
         return
-    updated = await users_service.register_seller(user["id"], "+" + digits)
+    try:
+        updated = await users_service.register_seller(user["id"], "+" + digits)
+    except ServiceError as exc:
+        await message.answer(str(exc))
+        return
     await state.clear()
     await message.answer(
         t(lang, "seller.registered", code=updated["seller_code"]),
         reply_markup=main_menu_reply(lang, True, is_admin_user(updated)),
+    )
+    await notifications.notify_admin_event(
+        bot,
+        "new_seller",
+        name=esc(updated["full_name"]) or "—",
+        tg_id=updated["tg_id"],
+        code=updated["seller_code"] or "—",
     )
 
 
@@ -102,7 +120,15 @@ async def add_start(
         await callback.answer(t(lang, "seller.only_sellers"), show_alert=True)
         return
     await state.set_state(SellerFlow.title)
-    await state.update_data(title="", description="", login="", password="", price=0)
+    await state.update_data(
+        title="",
+        description="",
+        photo_id=None,
+        extra_info="",
+        login="",
+        password="",
+        price=0,
+    )
     if callback.message is not None:
         await callback.message.answer(
             t(lang, "seller.add_title"), reply_markup=cancel_reply(lang)
@@ -133,6 +159,43 @@ async def add_description(message: Message, lang: str, state: FSMContext) -> Non
         await message.answer(t(lang, "seller.invalid_desc"))
         return
     await state.update_data(description=text)
+    await state.set_state(SellerFlow.photo)
+    await message.answer(
+        t(lang, "seller.add_photo_prompt"),
+        reply_markup=cancel_reply(lang),
+    )
+
+
+@router.message(StateFilter(SellerFlow.photo))
+async def add_photo(message: Message, lang: str, state: FSMContext) -> None:
+    text = (message.text or "").strip()
+    is_skip = text in ("-",) or any(
+        text == t(lang_, "common.none") for lang_ in ("uz", "ru", "en")
+    )
+    if message.photo:
+        photo_id = message.photo[-1].file_id
+    elif is_skip:
+        photo_id = None
+    else:
+        await message.answer(t(lang, "seller.photo_invalid"))
+        return
+    await state.update_data(photo_id=photo_id)
+    await state.set_state(SellerFlow.extra_info)
+    await message.answer(
+        t(lang, "seller.add_extra_prompt"),
+        reply_markup=cancel_reply(lang),
+    )
+
+
+@router.message(StateFilter(SellerFlow.extra_info))
+async def add_extra_info(message: Message, lang: str, state: FSMContext) -> None:
+    text = (message.text or "").strip()
+    if text in ("-",) or any(text == t(lang_, "common.none") for lang_ in ("uz", "ru", "en")):
+        text = ""
+    if len(text) > 500:
+        await message.answer(t(lang, "seller.extra_invalid"))
+        return
+    await state.update_data(extra_info=text)
     await state.set_state(SellerFlow.login)
     await message.answer(t(lang, "seller.add_login_prompt"), reply_markup=cancel_reply(lang))
 
@@ -177,24 +240,46 @@ async def add_price(message: Message, lang: str, state: FSMContext) -> None:
         await message.answer(t(lang, "seller.price_invalid", min_price=fmt_sum(MIN_PRICE)))
         return
     await state.update_data(price=price)
+    await state.set_state(SellerFlow.verify_ownership)
+    await message.answer(
+        t(lang, "seller.add_ownership_title"),
+        reply_markup=ownership_keyboard(lang),
+    )
+
+
+@router.callback_query(F.data == "seller:ownership:yes")
+async def ownership_yes(
+    callback: CallbackQuery, lang: str, state: FSMContext
+) -> None:
+    current = await state.get_state()
+    if current != SellerFlow.verify_ownership.state:
+        await callback.answer(t(lang, "seller.ownership_required"), show_alert=True)
+        return
     data = await state.get_data()
     await state.set_state(SellerFlow.confirm)
+    await state.update_data(ownership_confirmed=True)
     text = t(
         lang,
         "seller.add_confirm_title",
-        title=esc(data["title"]),
-        description=esc(data["description"]) or t(lang, "seller.no_description"),
-        login=esc(data["login"]),
-        price=fmt_sum(price),
+        title=esc(data.get("title", "")),
+        description=esc(data.get("description", "")) or t(lang, "seller.no_description"),
+        photo="✅" if data.get("photo_id") else "—",
+        extra=esc(data.get("extra_info", "")) or "—",
+        login=esc(data.get("login", "")),
+        price=fmt_sum(int(data.get("price", 0))),
     )
-    await message.answer(text, reply_markup=add_confirm_keyboard(lang))
+    await callback.answer()
+    await respond(callback, text, add_confirm_keyboard(lang))
 
 
 @router.callback_query(F.data == "seller:add:yes")
 async def add_confirm(
-    callback: CallbackQuery, user: dict, lang: str, state: FSMContext
+    callback: CallbackQuery, user: dict, lang: str, state: FSMContext, bot: Bot
 ) -> None:
     data = await state.get_data()
+    if not data.get("ownership_confirmed"):
+        await callback.answer(t(lang, "seller.ownership_required"), show_alert=True)
+        return
     try:
         account_id = await marketplace.create_account(
             user["id"],
@@ -204,17 +289,29 @@ async def add_confirm(
             data.get("password", ""),
             int(data.get("price", 0)),
             "real",
+            photo_id=data.get("photo_id"),
+            extra_info=data.get("extra_info", ""),
+            verification_status="verified",
         )
     except ServiceError as exc:
         await callback.answer(str(exc), show_alert=True)
         return
     await state.clear()
     await callback.answer()
+    account = await marketplace.get_account(account_id)
+    display_id = int(account.get("display_id") or account_id) if account else account_id
     if callback.message is not None:
         await callback.message.answer(
-            t(lang, "seller.added", id=account_id, price=fmt_sum(data.get("price", 0))),
+            t(lang, "seller.added", id=display_id, price=fmt_sum(data.get("price", 0))),
             reply_markup=main_menu_reply(lang, True, is_admin_user(user)),
         )
+    await notifications.notify_admin_event(
+        bot,
+        "new_listing",
+        id=display_id,
+        title=esc(data.get("title", "")),
+        price=fmt_sum(int(data.get("price", 0))),
+    )
 
 
 @router.callback_query(F.data == "seller:add:cancel")
@@ -240,7 +337,7 @@ async def account_detail(callback: CallbackQuery, user: dict, lang: str) -> None
     text = t(
         lang,
         "seller.account_detail",
-        id=account["id"],
+        id=account.get("display_id") or account["id"],
         title=esc(account["title"]),
         description=esc(account["description"]) or t(lang, "seller.no_description"),
         login=esc(login),
@@ -278,7 +375,7 @@ async def toggle_pause(callback: CallbackQuery, user: dict, lang: str) -> None:
     text = t(
         lang,
         "seller.account_detail",
-        id=account["id"],
+        id=account.get("display_id") or account["id"],
         title=esc(account["title"]),
         description=esc(account["description"]) or t(lang, "seller.no_description"),
         login=esc(login),
@@ -298,7 +395,11 @@ async def delete_ask(callback: CallbackQuery, user: dict, lang: str) -> None:
         return
     await callback.answer()
 
-    text = t(lang, "seller.delete_confirm", id=account["id"])
+    text = t(
+        lang,
+        "seller.delete_confirm",
+        id=account.get("display_id") or account["id"],
+    )
     await respond(callback, text, delete_confirm_keyboard(lang, account["id"]))
 
 
@@ -333,7 +434,7 @@ async def price_ask(
             t(
                 lang,
                 "seller.edit_price_prompt",
-                id=account["id"],
+                id=account.get("display_id") or account["id"],
                 price=fmt_sum(account["price"]),
                 min_price=fmt_sum(MIN_PRICE),
             ),

@@ -3,18 +3,11 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Awaitable, Callable
-from typing import Any
 
-from aiogram import BaseMiddleware, Bot, F, Router
-from aiogram.filters import StateFilter
+from aiogram import Bot, F, Router
+from aiogram.filters import Filter, StateFilter
 from aiogram.fsm.context import FSMContext
-from aiogram.types import (
-    CallbackQuery,
-    InlineKeyboardButton,
-    Message,
-    TelegramObject,
-)
+from aiogram.types import CallbackQuery, InlineKeyboardButton, Message
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 from config import TEST_INITIAL_BALANCE, TEST_MAX_ACCOUNTS
@@ -37,27 +30,15 @@ from utils import esc, fmt_dt, fmt_sum, parse_amount
 router = Router(name="admin")
 
 
-class AdminMiddleware(BaseMiddleware):
-    async def __call__(
-        self,
-        handler: Callable[[TelegramObject, dict[str, Any]], Awaitable[Any]],
-        event: TelegramObject,
-        data: dict[str, Any],
-    ) -> Any:
-        user = data.get("user")
-        if not user or not user.get("is_admin"):
-            lang = data.get("lang") or "uz"
-            text = t(lang, "admin.only_admin")
-            if isinstance(event, CallbackQuery):
-                await event.answer(text, show_alert=True)
-            elif isinstance(event, Message):
-                await event.answer(text)
-            return None
-        return await handler(event, data)
+class IsAdminFilter(Filter):
+    """Only let admins through; everyone else falls through to the fallback router."""
+
+    async def __call__(self, user: dict | None = None) -> bool:
+        return bool(user and user.get("is_admin"))
 
 
-router.callback_query.outer_middleware(AdminMiddleware())
-router.message.outer_middleware(AdminMiddleware())
+router.callback_query.filter(IsAdminFilter())
+router.message.filter(IsAdminFilter())
 
 
 def _btn(text: str, data: str) -> InlineKeyboardButton:
@@ -275,7 +256,7 @@ async def _render_disputes(callback: CallbackQuery, lang: str, page: int) -> Non
         lang,
         "admin.dispute_card",
         order=row["order_id"],
-        account=row["account_id"],
+        account=row.get("account_display_id") or row["account_id"],
         buyer=esc(row["buyer_name"]) or "—",
         buyer_tg=row["buyer_tg"],
         seller=esc(row["seller_name"]) or "—",
@@ -285,12 +266,8 @@ async def _render_disputes(callback: CallbackQuery, lang: str, page: int) -> Non
         reason=esc(row["reason"]),
         date=fmt_dt(row["created_at"]),
     )
+    text += "\n\n" + t(lang, "admin.dispute_readonly")
     kb = InlineKeyboardBuilder()
-    kb.row(
-        _btn(t(lang, "admin.refund"), f"admin:disp:refund:{row['order_id']}"),
-        _btn(t(lang, "admin.release"), f"admin:disp:release:{row['order_id']}"),
-    )
-    kb.row(_btn(t(lang, "admin.check_creds"), f"admin:disp:creds:{row['order_id']}"))
     kb.row(*_pager("admin:disputes", page, len(rows), lang))
     kb.row(_btn(t(lang, "admin.back"), "admin:home"))
     await respond(callback, text, kb.as_markup())
@@ -300,65 +277,6 @@ async def _render_disputes(callback: CallbackQuery, lang: str, page: int) -> Non
 async def disputes(callback: CallbackQuery, lang: str) -> None:
     await callback.answer()
     await _render_disputes(callback, lang, _page(callback.data))
-
-
-@router.callback_query(F.data.startswith("admin:disp:creds:"))
-async def dispute_creds(callback: CallbackQuery, lang: str) -> None:
-    order_id = _tail_id(callback.data)
-    if order_id is None:
-        await callback.answer(t(lang, "common.invalid_data"), show_alert=True)
-        return
-    try:
-        login, password = await marketplace.get_credentials_admin(order_id)
-    except ServiceError as exc:
-        await callback.answer(str(exc), show_alert=True)
-        return
-    if callback.message is not None:
-        await callback.message.answer(
-            t(
-                lang,
-                "admin.dispute_creds",
-                order=order_id,
-                login=esc(login),
-                password=esc(password),
-            )
-        )
-    await callback.answer()
-
-
-@router.callback_query(F.data.startswith("admin:disp:refund:"))
-@router.callback_query(F.data.startswith("admin:disp:release:"))
-async def dispute_resolve(
-    callback: CallbackQuery, user: dict, lang: str, bot: Bot
-) -> None:
-    parts = (callback.data or "").split(":")
-    if len(parts) != 4:
-        await callback.answer(t(lang, "common.invalid_data"), show_alert=True)
-        return
-    action = parts[2]
-    try:
-        order_id = int(parts[3])
-    except ValueError:
-        await callback.answer(t(lang, "common.invalid_data"), show_alert=True)
-        return
-    try:
-        info = await marketplace.resolve_dispute(order_id, action, user["tg_id"])
-    except ServiceError as exc:
-        await callback.answer(str(exc), show_alert=True)
-        return
-    await notifications.dispute_resolved(bot, info)
-    await marketplace.log_audit(user["tg_id"], f"dispute.{action}", f"#{order_id}")
-    if action == "refund":
-        message = t(
-            lang,
-            "admin.dispute_refunded",
-            order=order_id,
-            amount=fmt_sum(info["total"]),
-        )
-    else:
-        message = t(lang, "admin.dispute_released", order=order_id)
-    await callback.answer(message)
-    await _render_disputes(callback, lang, 1)
 
 
 @router.callback_query(F.data == "admin:sales")
@@ -392,7 +310,7 @@ async def accounts(callback: CallbackQuery, lang: str) -> None:
         t(
             lang,
             "admin.accounts_line",
-            id=row["id"],
+            id=row.get("display_id") or row["id"],
             status=t(lang, "account.status." + row["status"]),
             price=fmt_sum(row["price"]),
             seller=esc(row["seller_name"]) or "—",
@@ -425,6 +343,133 @@ async def audit(callback: CallbackQuery, lang: str) -> None:
     text = t(lang, "admin.audit_title") + "\n\n" + "\n".join(lines)
     await callback.answer()
     await respond(callback, text, back_keyboard(lang, "admin:home"))
+
+
+# --------------------------------------------------------------------------
+# Wallets
+# --------------------------------------------------------------------------
+WALLET_PAGE_SIZE = 10
+
+
+async def _render_wallets(callback: CallbackQuery, lang: str, page: int) -> None:
+    total = await payment.count_wallets()
+    if total == 0:
+        await callback.answer()
+        await respond(
+            callback,
+            t(lang, "admin.wallets_empty"),
+            back_keyboard(lang, "admin:home"),
+        )
+        return
+    total_pages = max(1, (total + WALLET_PAGE_SIZE - 1) // WALLET_PAGE_SIZE)
+    page = min(max(1, page), total_pages)
+    rows = await payment.list_wallets(
+        limit=WALLET_PAGE_SIZE, offset=(page - 1) * WALLET_PAGE_SIZE
+    )
+    lines = [
+        t(
+            lang,
+            "admin.wallets_line",
+            tg=row["tg_id"],
+            name=esc(row["full_name"]) or "—",
+            balance=fmt_sum(row["balance"]),
+            test_balance=fmt_sum(row["test_balance"]),
+        )
+        for row in rows
+    ]
+    kb = InlineKeyboardBuilder()
+    kb.row(*_pager("admin:wallets", page, total_pages, lang))
+    kb.row(_btn(t(lang, "admin.back"), "admin:home"))
+    await callback.answer()
+    await respond(
+        callback,
+        t(lang, "admin.wallets_title", total=total) + "\n\n" + "\n".join(lines),
+        kb.as_markup(),
+    )
+
+
+@router.callback_query(F.data.startswith("admin:wallets:"))
+async def wallets(callback: CallbackQuery, lang: str) -> None:
+    await _render_wallets(callback, lang, _page(callback.data))
+
+
+async def _render_all_transactions(
+    callback: CallbackQuery, lang: str, page: int
+) -> None:
+    total = await payment.count_transactions()
+    if total == 0:
+        await callback.answer()
+        await respond(
+            callback,
+            t(lang, "admin.transactions_empty"),
+            back_keyboard(lang, "admin:home"),
+        )
+        return
+    total_pages = max(1, (total + WALLET_PAGE_SIZE - 1) // WALLET_PAGE_SIZE)
+    page = min(max(1, page), total_pages)
+    rows = await payment.list_all_transactions(
+        limit=WALLET_PAGE_SIZE, offset=(page - 1) * WALLET_PAGE_SIZE
+    )
+    lines = [
+        t(
+            lang,
+            "admin.transactions_line",
+            id=row["id"],
+            user=esc(row.get("user_name")) or row.get("user_tg") or "—",
+            label=t(lang, f"tx.type.{row['type']}"),
+            sign="+" if int(row["amount"]) > 0 else "-",
+            amount=fmt_sum(abs(int(row["amount"]))),
+            status=t(lang, f"wallet.txstatus.{row.get('status') or 'completed'}"),
+            ref=esc(row.get("reference")) or "—",
+            date=fmt_dt(row["created_at"]),
+        )
+        for row in rows
+    ]
+    kb = InlineKeyboardBuilder()
+    kb.row(*_pager("admin:transactions", page, total_pages, lang))
+    kb.row(_btn(t(lang, "admin.back"), "admin:home"))
+    await callback.answer()
+    await respond(
+        callback,
+        t(lang, "admin.transactions_title", total=total) + "\n\n" + "\n".join(lines),
+        kb.as_markup(),
+    )
+
+
+@router.callback_query(F.data.startswith("admin:transactions:"))
+async def all_transactions(callback: CallbackQuery, lang: str) -> None:
+    await _render_all_transactions(callback, lang, _page(callback.data))
+
+
+@router.callback_query(F.data == "admin:walletlog")
+async def wallet_log(callback: CallbackQuery, lang: str) -> None:
+    rows = await payment.list_wallet_audit_logs(25)
+    await callback.answer()
+    if not rows:
+        await respond(
+            callback, t(lang, "admin.wallet_log_empty"), back_keyboard(lang, "admin:home")
+        )
+        return
+    lines = [
+        t(
+            lang,
+            "admin.wallet_log_line",
+            action=esc(row["action"]),
+            user=esc(row.get("user_name")) or row.get("user_tg") or row.get("user_id") or "—",
+            actor=row["actor_tg"] or "—",
+            amount=fmt_sum(row["amount"]),
+            before=fmt_sum(row["balance_before"]),
+            after=fmt_sum(row["balance_after"]),
+            note=esc(row.get("note")) or "—",
+            date=fmt_dt(row["created_at"]),
+        )
+        for row in rows
+    ]
+    await respond(
+        callback,
+        t(lang, "admin.wallet_log_title") + "\n\n" + "\n".join(lines),
+        back_keyboard(lang, "admin:home"),
+    )
 
 
 # --------------------------------------------------------------------------
@@ -509,14 +554,16 @@ async def user_action(
         await callback.answer(t(lang, "admin.user_not_found"), show_alert=True)
         return
 
-    if action == "balance":
+    if action in ("balance", "refund"):
+        tx_type = "refund" if action == "refund" else "adjustment"
         await state.set_state(AdminFlow.balance_amount)
-        await state.update_data(target_user_id=db_id)
+        await state.update_data(target_user_id=db_id, tx_type=tx_type)
         if callback.message is not None:
+            prompt = "admin.refund_prompt" if action == "refund" else "admin.balance_prompt"
             await callback.message.answer(
                 t(
                     lang,
-                    "admin.balance_prompt",
+                    prompt,
                     name=esc(target["full_name"]) or "—",
                     tg=target["tg_id"],
                     balance=fmt_sum(target["balance"]),
@@ -574,6 +621,7 @@ async def balance_note(
     data = await state.get_data()
     db_id = data.get("target_user_id")
     amount = data.get("amount")
+    tx_type = data.get("tx_type") or "adjustment"
     if not isinstance(db_id, int) or not isinstance(amount, int):
         await state.clear()
         await message.answer(t(lang, "common.invalid_data"))
@@ -583,7 +631,7 @@ async def balance_note(
         note = ""
     try:
         updated, new_balance = await payment.admin_adjust_balance(
-            db_id, amount, note, user["tg_id"]
+            db_id, amount, note, user["tg_id"], tx_type=tx_type
         )
     except ServiceError as exc:
         await message.answer(str(exc))
@@ -599,7 +647,9 @@ async def balance_note(
         reply_markup=main_menu_reply(lang, bool(user["is_seller"]), True),
     )
     await notifications.balance_changed(bot, updated, amount, new_balance)
-    await marketplace.log_audit(user["tg_id"], "user.balance", f"user#{db_id}: {amount}")
+    await marketplace.log_audit(
+        user["tg_id"], f"user.{tx_type}", f"user#{db_id}: {amount}"
+    )
     await _render_user(message, lang, updated)
 
 
@@ -689,7 +739,9 @@ async def test_panel(callback: CallbackQuery, user: dict, lang: str) -> None:
 async def test_toggle(callback: CallbackQuery, user: dict, lang: str) -> None:
     updated = await users_service.toggle_test_mode(user["id"], TEST_INITIAL_BALANCE)
     if updated["test_mode"]:
-        seeded = await marketplace.seed_test_accounts(TEST_MAX_ACCOUNTS)
+        seeded = await marketplace.seed_test_accounts(
+            TEST_MAX_ACCOUNTS, target_mode="test"
+        )
         key = "admin.test_on_msg"
         await callback.answer(
             t(lang, key, balance=fmt_sum(updated["test_balance"])),
@@ -704,7 +756,9 @@ async def test_toggle(callback: CallbackQuery, user: dict, lang: str) -> None:
 
 @router.callback_query(F.data == "admin:test:seed")
 async def test_seed(callback: CallbackQuery, user: dict, lang: str) -> None:
-    created = await marketplace.seed_test_accounts(TEST_MAX_ACCOUNTS)
+    created = await marketplace.seed_test_accounts(
+        TEST_MAX_ACCOUNTS, target_mode="test"
+    )
     await callback.answer(
         t(lang, "admin.test_seeded", count=created), show_alert=True
     )

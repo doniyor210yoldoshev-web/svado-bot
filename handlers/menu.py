@@ -9,10 +9,11 @@ from aiogram.types import Message
 
 from handlers.helpers import is_admin_user, resolve_menu_action
 from handlers.views import (
+    render_history,
     render_main_menu,
     render_orders,
     render_profile,
-    render_rules,
+    render_seller_accounts,
     render_seller_panel,
     render_seller_register,
     render_settings,
@@ -51,21 +52,25 @@ async def dispatch_menu(
         )
     elif action == "wallet":
         await render_wallet(message, user, lang)
-    elif action == "purchases":
+    elif action == "my_orders":
         await render_orders(message, user, lang, 1)
+    elif action == "history":
+        await render_history(message, user, lang)
     elif action == "profile":
         await render_profile(message, user, lang)
     elif action == "settings":
         await render_settings(message, user, lang)
-    elif action == "rules":
-        await render_rules(message, lang)
-    elif action == "support":
+    elif action == "help":
         await render_support(message, lang)
-    elif action == "seller":
-        await render_seller_panel(message, user, lang)
-    elif action == "become_seller":
+    elif action == "sell":
         if user["is_seller"]:
             await render_seller_panel(message, user, lang)
+        else:
+            await state.set_state(SellerFlow.phone)
+            await render_seller_register(message, user, lang)
+    elif action == "my_accounts":
+        if user["is_seller"]:
+            await render_seller_accounts(message, user, lang, 1)
         else:
             await state.set_state(SellerFlow.phone)
             await render_seller_register(message, user, lang)

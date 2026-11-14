@@ -91,6 +91,11 @@ def generate_reference(prefix: str) -> str:
     return f"{prefix}:{secrets.token_hex(12)}"
 
 
+def generate_payment_id() -> str:
+    """Human-friendly, unguessable payment order id (unique per top-up)."""
+    return f"PAY-{secrets.token_hex(8).upper()}"
+
+
 def is_admin(tg_id: int | None) -> bool:
     return tg_id is not None and int(tg_id) in ADMIN_IDS
 

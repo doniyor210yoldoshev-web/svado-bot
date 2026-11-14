@@ -7,9 +7,9 @@ admin panel. Multi-language: **O'zbekcha / Русский / English**.
 
 - **Marketplace**: akkauntlar ro'yxati, sahifalash, qidiruv (akkaunt ID yoki sotuvchi kodi).
 - **Escrow**: xaridor to'lovi vaqtincha ushlab turiladi, tasdiqlangach sotuvchiga o'tadi.
-- **Komissiya**: default 8% (`COMMISSION_PERCENT`), sotuvchiga 92%.
-- **Himoya**: tekshirish muddati (`CHECK_MINUTES`), kechikish jarimasi, avtomatik yakunlash.
-- **Nizolar**: xaridor nizo ochadi, admin qaytarish yoki sotuvchiga o'tkazishni hal qiladi.
+- **Komissiya**: default 7% (`COMMISSION_PERCENT`), sotuvchiga 93%.
+- **Himoya**: 5 daqiqalik to'lov oynasi, tekshirish muddati (`CHECK_MINUTES`), kechikish jarimasi, avtomatik yakunlash.
+- **Nizolar**: xaridor nizo ochadi, sotuvchi HA/YO'Q javob beradi, tizim avtomatik hal qiladi (admin aralashmaydi).
 - **Hamyon**: balans to'ldirish (karta + chek), yechib olish so'rovlari, tarix.
 - **Test rejimi**: admin istalgan foydalanuvchini test rejimiga o'tkazadi; test balansi va
   test akkauntlari real balansga ta'sir qilmaydi.
@@ -54,7 +54,7 @@ Birinchi ishga tushirishda `data/` papkasi va SQLite bazasi avtomatik yaratiladi
 | `HAMYON_API_URL` / `HAMYON_SHOP_ID` / `HAMYON_SHOP_KEY` | HamyonAPI sozlamalari (@HamyonAPIBot dan) | `https://hamyon-api.uz` / — |
 | `SUPPORT_USERNAME` | Yordam uchun username (@siz) | `""` |
 | `DEFAULT_LANG` | `uz`, `ru`, `en` | `uz` |
-| `COMMISSION_PERCENT` | Komissiya foizi | `8` |
+| `COMMISSION_PERCENT` | Komissiya foizi | `7` |
 | `CHECK_MINUTES` | Tekshirish muddati | `10` |
 | `PENALTY_PERCENT` / `PENALTY_INTERVAL_MINUTES` | Jarima foizi va intervali | `10` / `10` |
 | `AUTO_COMPLETE_MINUTES` | Avtomatik yakunlashgacha qo'shimcha vaqt | `60` |
@@ -62,6 +62,7 @@ Birinchi ishga tushirishda `data/` papkasi va SQLite bazasi avtomatik yaratiladi
 | `PAGE_SIZE` | Sahifadagi akkauntlar soni | `10` |
 | `TEST_INITIAL_BALANCE` | Test rejimi boshlang'ich balansi | `1000000` |
 | `TEST_MAX_ACCOUNTS` | Test rejimidagi akkauntlar limiti | `10` |
+| `SEED_TEST_ACCOUNTS` | Ishga tushishda test e'lonlarini yaratish | `1` |
 
 To'liq ro'yxat: `.env.example`.
 
@@ -109,6 +110,45 @@ zarur bo'lsa 1–2 so'mga o'zgartiriladi (mijozga ko'rsatilgan summa o'sha).
 HamyonAPI to'lovlari admin panelning "To'lovlar" ro'yxatida ko'rinmaydi (ular
 avtomatik tasdiqlanadi).
 
+## Hamyon tizimi
+
+Har bir foydalanuvchining alohida hamyoni bor: joriy balans, jami kirim/chiqim,
+kutilayotgan to'lovlar, tranzaksiyalar tarixi va to'lov holati. Hamyon ekraniga
+**👛 Hamyonim** tugmasi orqali kiriladi.
+
+- **Balansni to'ldirish** `MIN_TOPUP`–`MAX_TOPUP` oralig'ida; har bir to'lov
+  yaratilganda `PAY-XXXXXXXX...` ko'rinishidagi unikal `public_id` beriladi.
+  Balans faqat admin yoki rasmiy provayder callback'i to'lovni tasdiqlagach
+  yangilanadi.
+- **Hamyondan to'lash**: mahsulot sahifasida balans yetarli bo'lsa
+  «👛 Hamyondan to'lash» tugmasi chiqadi. Balans atomar yechiladi, buyurtma
+  yaratiladi va login-parol ochiladi. Balans yetmasa xarid bekor qilinadi.
+- **Xavfsizlik**: Click/HamyonAPI imzolari tekshiriladi; bir to'lov faqat bir
+  marta hisobga olinadi (`topups.status` bo'yicha shartli `UPDATE`); barcha
+  balans o'zgarishlari bitta database transaction ichida bajariladi.
+  `transactions.reference` unikal, foydalanuvchi faqat o'z tranzaksiyasini
+  ko'ra oladi.
+- **Jadvallar**: mavjud `users`/`transactions`/`topups`/`withdrawals`ga
+  qo'shimcha ravishda `wallets` (trigger orqali `users.balance` bilan sinxron),
+  `wallet_audit_logs` (admin aralashuvlari) yaratiladi. Migratsiyalar
+  `CREATE TABLE IF NOT EXISTS` va `ALTER TABLE ADD COLUMN` bilan xavfsiz —
+  eski ma'lumotlar saqlanadi.
+- **Admin panel**: 💰 Hamyonlar (barcha balanslar), 🧾 Tranzaksiyalar,
+  📝 Hamyon auditi, foydalanuvchi kartasidagi «Balansni o'zgartirish» va
+  «Pulni qaytarish» amallari. Har bir amal `wallet_audit_logs` va umumiy
+  `audit_logs`da qoladi.
+
+### Ma'lum cheklovlar
+
+- HamyonAPI da **pulni kartaga qaytarish (refund) API si yo'q**. Nizo xaridor
+  foydasiga hal bo'lganda summa botdagi ichki balansga qaytariladi; kartaga
+  qaytarishni qo'lda amalga oshirish kerak.
+- Akkaunt **egasini API orqali tekshirish xizmati mavjud emas**. Sotuvchi akkaunt
+  o'ziga tegishli ekanini o'zi tasdiqlaydi; bot login/parolni faqat to'lov
+  tasdiqlangandan keyin ko'rsatadi.
+- Nizoni admin hal qilmaydi: sotuvchi 15 daqiqa ichida `HA`/`YO'Q` javob beradi,
+  javob kelmasa tizim avtomatik qaytaradi.
+
 ## Render'ga deploy qilish
 
 1. Render'da **PostgreSQL** yarating va `DATABASE_URL` ni oling.
@@ -140,7 +180,7 @@ python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().d
 
 Test rejimini yoqish uchun admin panel → **Test rejimi**. Yoqilganda foydalanuvchiga test
 balansi beriladi va tizim sotuvchisi (`tg_id = -1`) tomonidan 10 ta arzon test akkaunti
-avtomatik qo'shiladi (narxi 1 000 so'm, login `test_<hex>`, parol `password123`).
+avtomatik qo'shiladi (narxi 1 000 so'm, login `test_<display_id>`, parol `password123`).
 "Test akkauntlar yaratish" tugmasi bilan qo'shimcha qo'shish mumkin.
 
 ## Loyiha tuzilishi
@@ -164,7 +204,25 @@ handlers/            # start, menu, seller, accounts, search, wallet, admin
 ```powershell
 .\.venv\Scripts\python.exe -m ruff check . --exclude .venv
 .\.venv\Scripts\python.exe -m compileall -q -x "\.venv" .
+.\.venv\Scripts\python.exe -m pytest
 ```
+
+Testlar izolyatsiyalangan SQLite bazasida ishlaydi (`.env` dagi haqiqiy bazaga
+tegmaydi). Hamyon uchun alohida `tests/test_wallet.py` mavjud: to'ldirish,
+muvaffaqiyatli/muvaffaqiyatsiz xarid, takroriy webhook, bir vaqtda bir nechta
+to'lov, refund, balans yetmasligi va ruxsatsiz tranzaksiyaga kirish tekshiriladi.
+CI `.github/workflows/ci.yml` orqali har bir push va PR da ruff, compile va
+pytest avtomatik tekshiriladi.
+
+## Docker
+
+```powershell
+docker compose up --build -d
+docker compose logs -f bot
+```
+
+`docker-compose.yml` `.env` faylini o'qiydi va `data/` papkasini `bot_data`
+volume ichida saqlaydi. Health endpoint: `http://localhost:8080/health`.
 
 ## Xavfsizlik eslatmalari
 

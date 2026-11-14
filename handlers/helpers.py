@@ -4,9 +4,9 @@ from __future__ import annotations
 
 import logging
 
-from aiogram.exceptions import TelegramBadRequest
+from aiogram.exceptions import TelegramAPIError, TelegramBadRequest
 from aiogram.filters import Filter
-from aiogram.types import CallbackQuery, InlineKeyboardMarkup, Message
+from aiogram.types import CallbackQuery, InlineKeyboardMarkup, InputMediaPhoto, Message
 
 from config import SUPPORTED_LANGS
 from services.i18n import t
@@ -24,7 +24,7 @@ MENU_ACTIONS = {
     "menu.settings": "settings",
     "menu.help": "help",
     "menu.admin": "admin",
-    # Aliases
+    # Aliases (inline keyboards and older locale keys)
     "menu.seller_panel": "my_accounts",
     "menu.become_seller": "sell",
     "menu.purchases": "my_orders",
@@ -59,8 +59,23 @@ async def safe_edit(
             disable_web_page_preview=True,
         )
     except TelegramBadRequest as exc:
-        if "message is not modified" not in str(exc):
-            logger.debug("edit_text xatosi: %s", exc)
+        if "message is not modified" in str(exc):
+            return
+        logger.debug("edit_text xatosi: %s", exc)
+        if message.photo or message.document or message.video:
+            try:
+                await message.delete()
+            except TelegramAPIError:
+                pass
+            try:
+                await message.answer(
+                    text,
+                    reply_markup=reply_markup,
+                    parse_mode="HTML",
+                    disable_web_page_preview=True,
+                )
+            except TelegramAPIError as send_exc:
+                logger.warning("Xabar yuborilmadi: %s", send_exc)
 
 
 async def respond(
@@ -86,6 +101,53 @@ async def respond(
             parse_mode="HTML",
             disable_web_page_preview=True,
         )
+
+
+async def respond_photo(
+    event: Message | CallbackQuery,
+    photo: str,
+    caption: str,
+    reply_markup: InlineKeyboardMarkup | None = None,
+) -> bool:
+    """Send or edit a photo message. Returns False when Telegram rejects it."""
+    try:
+        if isinstance(event, CallbackQuery):
+            if event.message is not None:
+                try:
+                    await event.message.edit_media(
+                        InputMediaPhoto(
+                            media=photo,
+                            caption=caption,
+                            parse_mode="HTML",
+                        ),
+                        reply_markup=reply_markup,
+                    )
+                    return True
+                except TelegramBadRequest:
+                    pass
+            await event.bot.send_photo(
+                event.from_user.id,
+                photo,
+                caption=caption,
+                reply_markup=reply_markup,
+                parse_mode="HTML",
+            )
+            if event.message is not None:
+                try:
+                    await event.message.delete()
+                except TelegramAPIError:
+                    pass
+        else:
+            await event.answer_photo(
+                photo,
+                caption=caption,
+                reply_markup=reply_markup,
+                parse_mode="HTML",
+            )
+        return True
+    except TelegramAPIError as exc:
+        logger.warning("Rasm yuborilmadi: %s", exc)
+        return False
 
 
 def resolve_menu_action(text: str | None) -> str | None:

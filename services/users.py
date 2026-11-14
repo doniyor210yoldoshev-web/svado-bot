@@ -24,8 +24,9 @@ async def ensure_user(tg_id: int, full_name: str, username: str | None) -> dict:
         )
     else:
         await db.execute(
-            "UPDATE users SET full_name = ?, username = ?, is_admin = ? WHERE id = ?",
-            (full_name or "", username, is_admin, row["id"]),
+            "UPDATE users SET full_name = ?, username = ?, is_admin = ?, updated_at = ? "
+            "WHERE id = ?",
+            (full_name or "", username, is_admin, utcnow_iso(), row["id"]),
         )
     return await db.fetchone("SELECT * FROM users WHERE tg_id = ?", (tg_id,))
 
@@ -51,6 +52,34 @@ async def set_lang(user_id: int, lang: str) -> None:
     await db.execute("UPDATE users SET lang = ? WHERE id = ?", (lang, user_id))
 
 
+def normalize_phone(phone: str) -> str:
+    digits = "".join(ch for ch in (phone or "") if ch.isdigit())
+    if len(digits) < 9:
+        raise ValidationError("Telefon raqami noto'g'ri")
+    return "+" + digits
+
+
+async def _ensure_phone_free(phone: str, user_id: int) -> None:
+    row = await db.fetchone(
+        "SELECT id FROM users WHERE phone = ? AND id <> ?", (phone, user_id)
+    )
+    if row is not None:
+        raise ServiceError("Bu telefon raqami allaqachon ishlatilgan")
+
+
+async def set_phone(user_id: int, phone: str, verified: bool = True) -> None:
+    normalized = normalize_phone(phone)
+    await _ensure_phone_free(normalized, user_id)
+    await db.execute(
+        "UPDATE users SET phone = ?, phone_verified = ?, updated_at = ? WHERE id = ?",
+        (normalized, 1 if verified else 0, utcnow_iso(), user_id),
+    )
+
+
+async def accept_terms(user_id: int) -> None:
+    await db.execute("UPDATE users SET terms_accepted = 1 WHERE id = ?", (user_id,))
+
+
 def user_lang(user: dict | None) -> str:
     if user and user.get("lang") in SUPPORTED_LANGS:
         return user["lang"]
@@ -74,10 +103,13 @@ async def register_seller(user_id: int, phone: str) -> dict:
         raise ServiceError("Foydalanuvchi topilmadi")
     if user["is_seller"]:
         return user
+    normalized = normalize_phone(phone)
+    await _ensure_phone_free(normalized, user_id)
     seller_code = await _unique_seller_code()
     await db.execute(
-        "UPDATE users SET phone = ?, seller_code = ?, is_seller = 1 WHERE id = ?",
-        (phone, seller_code, user_id),
+        "UPDATE users SET phone = ?, phone_verified = 1, seller_code = ?, is_seller = 1, "
+        "updated_at = ? WHERE id = ?",
+        (normalized, seller_code, utcnow_iso(), user_id),
     )
     return await get_user(user_id)
 

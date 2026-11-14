@@ -49,6 +49,12 @@ def main_menu(lang: str, is_seller: bool, is_admin: bool) -> InlineKeyboardMarku
     return kb.as_markup()
 
 
+def terms_keyboard(lang: str) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[[_b(t(lang, "reg.accept"), "terms:accept")]]
+    )
+
+
 def back_keyboard(lang: str, target: str = "menu:home") -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[[_b(t(lang, "common.back"), target)]]
@@ -106,7 +112,8 @@ def shop_keyboard(
     for account in accounts:
         kb.row(
             _b(
-                f"#{account['id']} · {account['title'][:28]} · {fmt_sum(account['price'])}",
+                f"#{account.get('display_id') or account['id']} · "
+                f"{account['title'][:28]} · {fmt_sum(account['price'])}",
                 f"shop:view:{account['id']}",
             )
         )
@@ -135,6 +142,26 @@ def buy_confirm_keyboard(lang: str, account_id: int) -> InlineKeyboardMarkup:
         inline_keyboard=[
             [_b(t(lang, "shop.confirm_yes"), f"shop:confirm:{account_id}")],
             [_b(t(lang, "common.back"), f"shop:view:{account_id}")],
+        ]
+    )
+
+
+def shop_payment_choice_keyboard(
+    lang: str, account_id: int, wallet_available: bool
+) -> InlineKeyboardMarkup:
+    kb = InlineKeyboardBuilder()
+    if wallet_available:
+        kb.row(_b(t(lang, "shop.pay_wallet"), f"shop:wallet:{account_id}"))
+    kb.row(_b(t(lang, "shop.pay_card"), f"shop:confirm:{account_id}"))
+    kb.row(_b(t(lang, "common.back"), f"shop:view:{account_id}"))
+    return kb.as_markup()
+
+
+def order_payment_keyboard(lang: str, order_id: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [_b(t(lang, "shop.payment_check"), f"order:paycheck:{order_id}")],
+            [_b(t(lang, "shop.payment_cancel"), f"order:paycancel:{order_id}")],
         ]
     )
 
@@ -187,7 +214,8 @@ def seller_accounts_keyboard(
     for account in accounts:
         kb.row(
             _b(
-                f"#{account['id']} · {account['title'][:24]} · {fmt_sum(account['price'])}",
+                f"#{account.get('display_id') or account['id']} · "
+                f"{account['title'][:24]} · {fmt_sum(account['price'])}",
                 f"seller:acc:{account['id']}",
             )
         )
@@ -226,6 +254,15 @@ def add_confirm_keyboard(lang: str) -> InlineKeyboardMarkup:
         inline_keyboard=[
             [_b(t(lang, "seller.add_confirm_yes"), "seller:add:yes")],
             [_b(t(lang, "common.cancel"), "seller:add:cancel")],
+        ]
+    )
+
+
+def ownership_keyboard(lang: str) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [_b(t(lang, "seller.add_ownership_yes"), "seller:ownership:yes")],
+            [_b(t(lang, "seller.add_ownership_no"), "seller:add:cancel")],
         ]
     )
 
@@ -279,9 +316,14 @@ def admin_menu_keyboard(lang: str) -> InlineKeyboardMarkup:
         _b(t(lang, "admin.audit_btn"), "admin:audit"),
     )
     kb.row(
+        _b(t(lang, "admin.wallets_btn"), "admin:wallets:1"),
+        _b(t(lang, "admin.transactions_btn"), "admin:transactions:1"),
+    )
+    kb.row(
         _b(t(lang, "admin.test_btn"), "admin:test"),
         _b(t(lang, "admin.broadcast_btn"), "admin:broadcast"),
     )
+    kb.row(_b(t(lang, "admin.wallet_log_btn"), "admin:walletlog"))
     kb.row(_b(t(lang, "common.back"), "menu:home"))
     return kb.as_markup()
 
@@ -321,13 +363,15 @@ def admin_withdrawal_keyboard(lang: str, withdrawal_id: int) -> InlineKeyboardMa
 
 def admin_dispute_keyboard(lang: str, order_id: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
+        inline_keyboard=[[_b(t(lang, "admin.back"), "admin:disputes:1")]]
+    )
+
+
+def seller_dispute_keyboard(lang: str, order_id: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
         inline_keyboard=[
-            [
-                _b(t(lang, "admin.refund"), f"admin:disp:refund:{order_id}"),
-                _b(t(lang, "admin.release"), f"admin:disp:release:{order_id}"),
-            ],
-            [_b(t(lang, "admin.check_creds"), f"admin:disp:creds:{order_id}")],
-            [_b(t(lang, "admin.back"), "admin:disputes:1")],
+            [_b(t(lang, "dispute.seller_yes"), f"disp:seller:ha:{order_id}")],
+            [_b(t(lang, "dispute.seller_no"), f"disp:seller:no:{order_id}")],
         ]
     )
 
@@ -343,6 +387,7 @@ def admin_user_keyboard(lang: str, user: dict) -> InlineKeyboardMarkup:
     else:
         kb.row(_b(t(lang, "admin.verify"), f"admin:user:verify:{user['id']}"))
     kb.row(_b(t(lang, "admin.balance_btn"), f"admin:user:balance:{user['id']}"))
+    kb.row(_b(t(lang, "admin.refund_btn"), f"admin:user:refund:{user['id']}"))
     kb.row(_b(t(lang, "admin.back"), "admin:home"))
     return kb.as_markup()
 

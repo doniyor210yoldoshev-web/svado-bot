@@ -11,12 +11,13 @@ from config import (
     CHECK_MINUTES,
     COMMISSION_PERCENT,
     PAGE_SIZE,
+    PAYMENT_PROVIDER,
     PENALTY_INTERVAL_MINUTES,
     PENALTY_PERCENT,
     SELLER_SHARE_PERCENT,
     SUPPORT_USERNAME,
 )
-from handlers.helpers import is_admin_user, respond
+from handlers.helpers import is_admin_user, respond, respond_photo
 from keyboards.inline import (
     back_keyboard,
     main_menu,
@@ -30,6 +31,7 @@ from keyboards.inline import (
     wallet_keyboard,
 )
 from keyboards.reply import main_menu_reply, phone_reply
+from services import hamyon as hamyon_service
 from services import marketplace, payment
 from services.i18n import t
 from services.users import get_user, seller_rating, seller_stats
@@ -45,6 +47,14 @@ def _paginate(items: list[dict], page: int) -> tuple[list[dict], int, int]:
 
 def _balance(user: dict) -> int:
     return int(user["test_balance"] if user["test_mode"] else user["balance"])
+
+
+def _external_escrow(user: dict) -> bool:
+    return (
+        not user["test_mode"]
+        and PAYMENT_PROVIDER == "hamyon"
+        and hamyon_service.is_configured()
+    )
 
 
 async def render_main_menu(event: Message | CallbackQuery, user: dict, lang: str) -> None:
@@ -159,17 +169,18 @@ async def render_shop_detail(
     rating = await seller_rating(seller["id"])
     mode = "test" if user["test_mode"] else "real"
     is_owner = account["seller_id"] == user["id"]
+    external = _external_escrow(user)
     can_buy = (
         account["status"] == "active"
         and account["mode"] == mode
         and not is_owner
         and not seller["is_blocked"]
-        and _balance(user) >= int(account["price"])
+        and (external or _balance(user) >= int(account["price"]))
     )
     text = t(
         lang,
         "shop.detail",
-        id=account["id"],
+        id=account.get("display_id") or account["id"],
         title=esc(account["title"]),
         description=esc(account["description"]) or t(lang, "seller.no_description"),
         seller=esc(seller["full_name"]) or "—",
@@ -182,9 +193,20 @@ async def render_shop_detail(
         text += "\n\n" + t(lang, "shop.not_available")
     elif is_owner:
         text += "\n\n" + t(lang, "shop.own_account")
-    elif _balance(user) < int(account["price"]):
-        text += "\n\n" + t(lang, "shop.buy_insufficient", amount=fmt_sum(int(account["price"]) - _balance(user)))
-    await respond(event, text, shop_detail_keyboard(lang, account, can_buy, is_owner))
+    elif not external and _balance(user) < int(account["price"]):
+        text += "\n\n" + t(
+            lang,
+            "shop.buy_insufficient",
+            required=fmt_sum(account["price"]),
+            available=fmt_sum(_balance(user)),
+        )
+    keyboard = shop_detail_keyboard(lang, account, can_buy, is_owner)
+    photo_id = account.get("photo_id")
+    if photo_id and len(text) <= 1024 and await respond_photo(
+        event, photo_id, text, keyboard
+    ):
+        return
+    await respond(event, text, keyboard)
 
 
 async def render_orders(
@@ -217,14 +239,59 @@ async def render_wallet(event: Message | CallbackQuery, user: dict, lang: str) -
         if summary["test_mode"]
         else ""
     )
+    # Jami kirim/chiqim qo'shildi
+    extra_lines = []
+    if not summary["test_mode"]:
+        total_in = summary.get("total_in", 0)
+        total_out = summary.get("total_out", 0)
+        if total_in > 0 or total_out > 0:
+            extra_lines.append(
+                t(lang, "wallet.total_in", value=fmt_sum(total_in))
+            )
+            extra_lines.append(
+                t(lang, "wallet.total_out", value=fmt_sum(total_out))
+            )
+        pending_topups = summary.get("pending_topups", 0)
+        if pending_topups > 0:
+            extra_lines.append(
+                t(lang, "wallet.pending_in", value=fmt_sum(pending_topups))
+            )
+        tx_count = summary.get("tx_count", 0)
+        if tx_count > 0:
+            extra_lines.append(t(lang, "wallet.tx_count", count=tx_count))
+    extra = ("\n" + "\n".join(extra_lines)) if extra_lines else ""
     text = t(
         lang,
         "wallet.title",
         balance=fmt_sum(summary["balance"]),
         test=test,
         commission=COMMISSION_PERCENT,
-    )
+    ) + extra
     await respond(event, text, wallet_keyboard(lang, summary["test_mode"]))
+
+
+async def render_history(event: Message | CallbackQuery, user: dict, lang: str) -> None:
+    mode = "test" if user["test_mode"] else "real"
+    rows = await payment.list_transactions(user["id"], mode)
+    if not rows:
+        await respond(event, t(lang, "wallet.no_transactions"), back_keyboard(lang))
+        return
+    lines = []
+    for row in rows:
+        sign = "+" if int(row["amount"]) > 0 else "-"
+        label = t(lang, f"tx.type.{row['type']}")
+        lines.append(
+            t(
+                lang,
+                "wallet.tx_line",
+                label=label,
+                sign=sign,
+                amount=fmt_sum(abs(int(row["amount"]))),
+                date=fmt_dt(row["created_at"]),
+            )
+        )
+    text = t(lang, "wallet.history") + "\n\n" + "\n".join(lines)
+    await respond(event, text, back_keyboard(lang))
 
 
 async def render_seller_panel(event: Message | CallbackQuery, user: dict, lang: str) -> None:
@@ -290,7 +357,7 @@ async def render_order_detail(
         lang,
         "order.view",
         id=order["id"],
-        account=order["account_id"],
+        account=order.get("account_display_id") or order["account_id"],
         seller=esc(order["seller_name"]) or "—",
         seller_code=esc(order["seller_code"]) or "—",
         price=fmt_sum(order["price"]),

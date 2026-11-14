@@ -37,10 +37,11 @@ from config import (
     HAMYON_SHOP_ID,
     HAMYON_SHOP_KEY,
     PUBLIC_BASE_URL,
+    SELLER_SHARE_PERCENT,
 )
 from services import notifications, payment
 from services.errors import ServiceError
-from utils import fmt_sum
+from utils import fmt_dt, fmt_sum
 
 logger = logging.getLogger(__name__)
 
@@ -248,34 +249,54 @@ async def handle_callback(data: dict[str, str]) -> dict:
 
 
 async def _handle_paid(payment_id: str, order_id: int | None, data: dict[str, str]) -> None:
-    # 1. Check if this is an escrow account order
+    # 1. Check if this is an escrow account order (any status: late payments matter)
     from database.db import db
     from services import marketplace
     order = None
-    if order_id is not None:
+    if payment_id:
         order = await db.fetchone(
-            "SELECT * FROM orders WHERE id = ? AND status = 'pending_payment'",
-            (order_id,),
-        )
-    if order is None and payment_id:
-        order = await db.fetchone(
-            "SELECT * FROM orders WHERE payment_id = ? AND status = 'pending_payment'",
+            "SELECT * FROM orders WHERE payment_id = ?",
             (payment_id,),
+        )
+    if order is None and order_id is not None:
+        order = await db.fetchone(
+            "SELECT * FROM orders WHERE id = ?",
+            (order_id,),
         )
 
     if order is not None:
-        if not _amount_matches(data.get("amount"), int(order["price"])):
+        expected = int(order.get("payment_amount") or order["price"])
+        if not _amount_matches(data.get("amount"), expected):
             logger.error(
                 "Hamyon paid (Order): summa mos emas (order=%s, expected=%s, got=%s)",
                 order["id"],
-                order["price"],
+                expected,
                 data.get("amount"),
+            )
+            return
+        if order["status"] == "cancelled":
+            late = await marketplace.handle_late_order_payment(order["id"], payment_id)
+            await _notify_late_payment(late)
+            logger.info(
+                "Hamyon paid (late): order=%s payment_id=%s action=%s",
+                order["id"],
+                payment_id,
+                late.get("action") if late else None,
+            )
+            return
+        if order["status"] != "pending_payment":
+            logger.info(
+                "Hamyon paid (Order): allaqachon qayta ishlangan "
+                "(order=%s status=%s payment_id=%s)",
+                order["id"],
+                order["status"],
+                payment_id,
             )
             return
         info = await marketplace.confirm_escrow_payment(order["id"], payment_id)
         if _bot is not None and info.get("buyer") and info.get("account"):
             from config import CHECK_MINUTES, PENALTY_INTERVAL_MINUTES, PENALTY_PERCENT
-            login, pwd, extra = await marketplace.get_credentials(order["id"], order["buyer_id"])
+            login, pwd, _extra = await marketplace.get_credentials(order["id"], order["buyer_id"])
             await notifications.notify(
                 _bot,
                 info["buyer"]["tg_id"],
@@ -298,7 +319,7 @@ async def _handle_paid(payment_id: str, order_id: int | None, data: dict[str, st
                 title=info["account"]["title"],
                 price=fmt_sum(order["price"]),
                 order=order["id"],
-                share=93,
+                share=SELLER_SHARE_PERCENT,
             )
             await notifications.notify_admin_event(
                 _bot,
@@ -332,6 +353,73 @@ async def _handle_paid(payment_id: str, order_id: int | None, data: dict[str, st
     if not info.get("already"):
         await _notify_paid(info)
     logger.info("Hamyon paid: topup=%s payment_id=%s", topup["id"], payment_id)
+
+
+async def _notify_late_payment(late: dict | None) -> None:
+    if _bot is None or not late:
+        return
+    action = late.get("action")
+    buyer = late.get("buyer") or {}
+    seller = late.get("seller") or {}
+    order = late.get("order") or {}
+    if action == "reactivated":
+        from config import CHECK_MINUTES, PENALTY_INTERVAL_MINUTES, PENALTY_PERCENT
+        from services import marketplace
+
+        account = late.get("account") or {}
+        try:
+            login, pwd, _extra = await marketplace.get_credentials(
+                order["id"], order["buyer_id"]
+            )
+        except ServiceError:
+            login, pwd = "—", "—"
+        await notifications.notify(
+            _bot,
+            buyer.get("tg_id"),
+            buyer.get("lang"),
+            "shop.purchased",
+            title=account.get("title", ""),
+            login=login,
+            password=pwd,
+            price=fmt_sum(order.get("price", 0)),
+            deadline=fmt_dt(order.get("check_deadline")),
+            minutes=CHECK_MINUTES,
+            interval=PENALTY_INTERVAL_MINUTES,
+            penalty=PENALTY_PERCENT,
+        )
+        if seller.get("tg_id"):
+            await notifications.notify(
+                _bot,
+                seller["tg_id"],
+                seller.get("lang"),
+                "notify.seller_sold",
+                title=account.get("title", ""),
+                price=fmt_sum(order.get("price", 0)),
+                order=order.get("id"),
+                share=SELLER_SHARE_PERCENT,
+            )
+        await notifications.notify_admin_event(
+            _bot,
+            "payment_confirmed",
+            order_id=order.get("id"),
+            amount=fmt_sum(late.get("amount", 0)),
+        )
+        return
+    if action == "credited":
+        await notifications.notify(
+            _bot,
+            buyer.get("tg_id"),
+            buyer.get("lang"),
+            "shop.payment_late_credited",
+            order=order.get("id"),
+            amount=fmt_sum(late.get("amount", 0)),
+        )
+        await notifications.notify_admin_event(
+            _bot,
+            "late_payment_credited",
+            order_id=order.get("id"),
+            amount=fmt_sum(late.get("amount", 0)),
+        )
 
 
 async def _handle_cancel(payment_id: str, order_id: int | None, reason: str) -> None:

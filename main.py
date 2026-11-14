@@ -11,7 +11,13 @@ from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
 from aiogram.types import BotCommand, ErrorEvent
 
-from config import ADMIN_IDS, BOT_TOKEN, FSM_DB_PATH
+from config import (
+    ADMIN_IDS,
+    BOT_TOKEN,
+    FSM_DB_PATH,
+    SEED_TEST_ACCOUNTS,
+    TEST_MAX_ACCOUNTS,
+)
 from database.db import db
 from database.fsm import SQLiteStorage
 from handlers import routers
@@ -47,6 +53,17 @@ async def main() -> None:
     reload_locales()
     await db.connect()
     logger.info("Ma'lumotlar bazasi ulandi: %s", db.describe())
+
+    if SEED_TEST_ACCOUNTS:
+        try:
+            from services import marketplace
+
+            created = await marketplace.seed_test_accounts(
+                TEST_MAX_ACCOUNTS, target_mode="test"
+            )
+            logger.info("Test e'lonlar tayyorlandi: %s ta yangi", created)
+        except Exception as exc:  # noqa: BLE001 - seeding is non critical
+            logger.warning("Test e'lonlarni tayyorlab bo'lmadi: %s", exc)
 
     storage = SQLiteStorage(FSM_DB_PATH)
     await storage.connect()

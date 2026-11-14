@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import logging
 import math
-import secrets
 from datetime import timedelta
 
 from config import (
@@ -22,7 +21,7 @@ from database.db import db
 from services import security
 from services import users as users_service
 from services.errors import InsufficientFunds, ServiceError
-from utils import fmt_sum, parse_dt, utcnow, utcnow_iso
+from utils import fmt_dt, fmt_sum, parse_dt, utcnow, utcnow_iso
 
 logger = logging.getLogger(__name__)
 
@@ -57,7 +56,7 @@ async def create_account(
     photo_id: str | None = None,
     extra_info: str = "",
     verification_code: str | None = None,
-    verification_status: str = "verified",
+    verification_status: str = "unverified",
     display_id: int | None = None,
 ) -> int:
     title = (title or "").strip()
@@ -68,6 +67,8 @@ async def create_account(
         raise ServiceError("Nom 2-100 belgi bo'lishi kerak")
     if len(description) > 1000:
         raise ServiceError("Tavsif 1000 belgidan oshmasligi kerak")
+    if len(extra_info) > 500:
+        raise ServiceError("Qo'shimcha ma'lumot 500 belgidan oshmasligi kerak")
     if not 2 <= len(login) <= 200:
         raise ServiceError("Login 2-200 belgi bo'lishi kerak")
     if not 4 <= len(password) <= 200:
@@ -89,8 +90,8 @@ async def create_account(
         "INSERT INTO accounts "
         "(display_id, seller_id, title, description, photo_id, extra_info, "
         "verification_code, verification_status, login_enc, login_hash, password_enc, "
-        "price, status, mode, is_approved, created_at) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?, ?)",
+        "price, status, mode, is_approved, created_at, updated_at) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?, ?, ?)",
         (
             display_id,
             seller_id,
@@ -106,6 +107,7 @@ async def create_account(
             price,
             mode,
             is_approved,
+            utcnow_iso(),
             utcnow_iso(),
         ),
     )
@@ -158,20 +160,20 @@ TEST_SELLER_PHONE = "+998000000000"
 TEST_SELLER_PASSWORD = "password123"
 
 TEST_ACCOUNT_TEMPLATES: tuple[tuple[str, str, int], ...] = (
-    ("Telegram Premium • 6 oylik obuna faol", "Shaxsiy foydalanish uchun toza akkaunt, barcha emojilar va yulduzlar faol, spam-blok yo'q.", 150_000),
-    ("Telegram Shaxsiy Akkaunt • 2019-yil (Eski)", "5 yillik toza tarixli akkaunt, hech qanday cheklovlarsiz, 2FA toza holatda.", 80_000),
-    ("Telegram Kanal Admin Akkaunt • 10K obunachi", "IT va texnologiya mavzusidagi kanal admin huquqi bilan birga topshiriladi.", 450_000),
-    ("Telegram Biznes Akkaunt • Bot va Stars ulangan", "Biznes xabarlar, avto-javoblar va maxsus username sozlangan profil.", 220_000),
-    ("Telegram USA (+1) Raqamli Akkaunt", "Virtual xavfsiz raqamda ochilgan, faol begona sessiyalar yo'q, xavfsiz.", 60_000),
-    ("Telegram Guruh Admin Akkaunt • 5 000 a'zo", "Faol savdo-sotiq guruhi boshqaruvchisi, toza reputatsiyaga ega.", 190_000),
-    ("Telegram Crypto & Stars Akkaunt • Wallet faol", "Tonkeeper va Telegram Wallet ulangan, tranzaksiyalar tarixi toza.", 300_000),
-    ("Telegram Eski O'zbekiston (+998) Akkaunt", "2021-yilda ochilgan, do'stlar va kontaktlar bilan faol akkaunt.", 75_000),
-    ("Telegram Dasturchi Akkaunt • API ID & Hash", "Botfather'da tasdiqlangan botlar mavjud, cheklovsiz API kirish imkoni.", 120_000),
-    ("Telegram Premium Yillik Akkaunt • VIP Badge", "1 yillik rasmiy Premium obunasi bor, noyob yulduzli profil badge.", 280_000),
+    ("Telegram Premium • 6 oylik obuna faol", "Shaxsiy foydalanish uchun toza akkaunt, barcha emojilar va yulduzlar faol, spam-blok yo'q.", 1_000),
+    ("Telegram Shaxsiy Akkaunt • 2019-yil (Eski)", "5 yillik toza tarixli akkaunt, hech qanday cheklovlarsiz, 2FA toza holatda.", 1_000),
+    ("Telegram Kanal Admin Akkaunt • 10K obunachi", "IT va texnologiya mavzusidagi kanal admin huquqi bilan birga topshiriladi.", 1_000),
+    ("Telegram Biznes Akkaunt • Bot va Stars ulangan", "Biznes xabarlar, avto-javoblar va maxsus username sozlangan profil.", 1_000),
+    ("Telegram USA (+1) Raqamli Akkaunt", "Virtual xavfsiz raqamda ochilgan, faol begona sessiyalar yo'q, xavfsiz.", 1_000),
+    ("Telegram Guruh Admin Akkaunt • 5 000 a'zo", "Faol savdo-sotiq guruhi boshqaruvchisi, toza reputatsiyaga ega.", 1_000),
+    ("Telegram Crypto & Stars Akkaunt • Wallet faol", "Tonkeeper va Telegram Wallet ulangan, tranzaksiyalar tarixi toza.", 1_000),
+    ("Telegram Eski O'zbekiston (+998) Akkaunt", "2021-yilda ochilgan, do'stlar va kontaktlar bilan faol akkaunt.", 1_000),
+    ("Telegram Dasturchi Akkaunt • API ID & Hash", "Botfather'da tasdiqlangan botlar mavjud, cheklovsiz API kirish imkoni.", 1_000),
+    ("Telegram Premium Yillik Akkaunt • VIP Badge", "1 yillik rasmiy Premium obunasi bor, noyob yulduzli profil badge.", 1_000),
 )
 
 
-async def seed_test_accounts(max_accounts: int = TEST_MAX_ACCOUNTS, target_mode: str = "real") -> int:
+async def seed_test_accounts(max_accounts: int = TEST_MAX_ACCOUNTS, target_mode: str = "test") -> int:
     """Ensure the system test seller exists with up to ``max_accounts`` test accounts.
 
     Creates realistic sample listings with IDs 10001, 10002... verified and ready for trade testing.
@@ -189,12 +191,12 @@ async def seed_test_accounts(max_accounts: int = TEST_MAX_ACCOUNTS, target_mode:
     for offset in range(remaining):
         idx = existing + offset
         title, description, price = TEST_ACCOUNT_TEMPLATES[idx % len(TEST_ACCOUNT_TEMPLATES)]
-        login = f"+99890{1000000 + idx}"
         display_id = 10001 + idx
         # Ensure display_id doesn't collide with existing
         exists = await db.fetchone("SELECT 1 AS f FROM accounts WHERE display_id = ?", (display_id,))
         if exists:
             display_id = await _next_display_id()
+        login = f"test_{display_id}"
         await create_account(
             seller_id=system["id"],
             title=title,
@@ -203,7 +205,7 @@ async def seed_test_accounts(max_accounts: int = TEST_MAX_ACCOUNTS, target_mode:
             password=TEST_SELLER_PASSWORD,
             price=price,
             mode=target_mode,
-            photo_id="test_photo_sample",
+            photo_id=None,
             extra_info="2FA paroli: 123456 | Qayta tiklash emaili yo'q",
             verification_status="verified",
             display_id=display_id,
@@ -361,8 +363,9 @@ async def create_escrow_order(buyer_id: int, account_id: int) -> tuple[dict, dic
 
         # Concurrency safety: atomic claim
         claimed = await ex.execute(
-            "UPDATE accounts SET status = 'reserved' WHERE id = ? AND status = 'active'",
-            (account["id"],),
+            "UPDATE accounts SET status = 'reserved', updated_at = ? "
+            "WHERE id = ? AND status = 'active'",
+            (utcnow_iso(), account["id"]),
         )
         if claimed == 0:
             raise ServiceError("Bu akkaunt allaqachon boshqa xaridor tomonidan band qilindi")
@@ -388,6 +391,50 @@ async def create_escrow_order(buyer_id: int, account_id: int) -> tuple[dict, dic
         if order is None:
             raise ServiceError("Buyurtma yaratib bo'lmadi")
     return order, account, seller
+
+
+async def attach_escrow_payment(
+    order_id: int, buyer_id: int, payment_id: str, amount: int, card: str = ""
+) -> None:
+    """Store the payment id on the order and keep an auditable payments row."""
+    async with db.transaction() as ex:
+        order = await ex.fetchone("SELECT * FROM orders WHERE id = ?", (order_id,))
+        if order is None or order["buyer_id"] != buyer_id:
+            raise ServiceError("Buyurtma topilmadi")
+        if order["status"] != "pending_payment":
+            raise ServiceError("Buyurtma to'lov holatida emas")
+        await ex.execute(
+            "UPDATE orders SET payment_id = ?, payment_amount = ?, updated_at = ? "
+            "WHERE id = ?",
+            (payment_id, int(amount), utcnow_iso(), order_id),
+        )
+        existing = await ex.fetchone(
+            "SELECT id FROM payments WHERE payment_id = ?", (payment_id,)
+        )
+        if existing is None:
+            await ex.execute(
+                "INSERT INTO payments "
+                "(order_id, user_id, amount, payment_id, provider, card, status, created_at) "
+                "VALUES (?, ?, ?, ?, 'hamyon', ?, 'pending', ?)",
+                (
+                    order_id,
+                    buyer_id,
+                    int(amount),
+                    payment_id,
+                    card or None,
+                    utcnow_iso(),
+                ),
+            )
+
+
+async def cancel_pending_order(order_id: int, buyer_id: int) -> dict | None:
+    """Buyer cancels an unpaid escrow order, returning the account to the market."""
+    order = await db.fetchone("SELECT * FROM orders WHERE id = ?", (order_id,))
+    if order is None or order["buyer_id"] != buyer_id:
+        raise ServiceError("Buyurtma topilmadi")
+    if order["status"] != "pending_payment":
+        raise ServiceError("Faqat to'lanmagan buyurtmani bekor qilish mumkin")
+    return await cancel_expired_order(order_id)
 
 
 async def create_order(buyer_id: int, account_id: int) -> tuple[dict, dict, dict]:
@@ -427,17 +474,17 @@ async def create_order(buyer_id: int, account_id: int) -> tuple[dict, dict, dict
             raise InsufficientFunds(int(account["price"]), int(buyer[balance_field]))
 
         claimed = await ex.execute(
-            "UPDATE accounts SET status = 'sold', sold_at = ? "
+            "UPDATE accounts SET status = 'sold', sold_at = ?, updated_at = ? "
             "WHERE id = ? AND status = 'active'",
-            (utcnow_iso(), account["id"]),
+            (utcnow_iso(), utcnow_iso(), account["id"]),
         )
         if claimed == 0:
             raise ServiceError("Bu akkaunt allaqachon sotilgan")
 
         debited = await ex.execute(
-            f"UPDATE users SET {balance_field} = {balance_field} - ? "
+            f"UPDATE users SET {balance_field} = {balance_field} - ?, updated_at = ? "
             f"WHERE id = ? AND {balance_field} >= ?",
-            (account["price"], buyer_id, account["price"]),
+            (account["price"], utcnow_iso(), buyer_id, account["price"]),
         )
         if debited == 0:
             raise InsufficientFunds(int(account["price"]), int(buyer[balance_field]))
@@ -510,16 +557,17 @@ async def confirm_escrow_payment(order_id: int, payment_id: str = "") -> dict:
         pid = payment_id or order.get("payment_id") or ""
         await ex.execute(
             "UPDATE orders SET status = 'checking', payment_id = ?, check_deadline = ?, "
-            "auto_complete_at = ? WHERE id = ?",
-            (pid, check_deadline, auto_complete_at, order_id),
+            "auto_complete_at = ?, updated_at = ? WHERE id = ?",
+            (pid, check_deadline, auto_complete_at, now_iso, order_id),
         )
         await ex.execute(
-            "UPDATE accounts SET status = 'sold', sold_at = ? WHERE id = ?",
-            (now_iso, account["id"]),
+            "UPDATE accounts SET status = 'sold', sold_at = ?, updated_at = ? WHERE id = ?",
+            (now_iso, now_iso, account["id"]),
         )
         await ex.execute(
-            "UPDATE payments SET status = 'paid', completed_at = ? WHERE order_id = ?",
-            (now_iso, order_id),
+            "UPDATE payments SET status = 'paid', completed_at = ?, updated_at = ? "
+            "WHERE order_id = ?",
+            (now_iso, now_iso, order_id),
         )
         await ex.execute(
             "INSERT INTO transactions "
@@ -554,16 +602,19 @@ async def cancel_expired_order(order_id: int) -> dict | None:
             return None
         now_iso = utcnow_iso()
         await ex.execute(
-            "UPDATE orders SET status = 'cancelled', completed_at = ? WHERE id = ?",
+            "UPDATE orders SET status = 'cancelled', completed_at = ?, updated_at = ? "
+            "WHERE id = ?",
+            (now_iso, now_iso, order_id),
+        )
+        await ex.execute(
+            "UPDATE accounts SET status = 'active', updated_at = ? "
+            "WHERE id = ? AND status = 'reserved'",
+            (now_iso, order["account_id"]),
+        )
+        await ex.execute(
+            "UPDATE payments SET status = 'cancelled', updated_at = ? "
+            "WHERE order_id = ? AND status = 'pending'",
             (now_iso, order_id),
-        )
-        await ex.execute(
-            "UPDATE accounts SET status = 'active' WHERE id = ? AND status = 'reserved'",
-            (order["account_id"],),
-        )
-        await ex.execute(
-            "UPDATE payments SET status = 'cancelled' WHERE order_id = ? AND status = 'pending'",
-            (order_id,),
         )
         buyer = await ex.fetchone("SELECT tg_id, lang FROM users WHERE id = ?", (order["buyer_id"],))
         seller = await ex.fetchone("SELECT tg_id, lang FROM users WHERE id = ?", (order["seller_id"],))
@@ -598,13 +649,17 @@ async def expire_pending_orders(bot=None) -> list[dict]:
                 st = str(res.get("status") or res.get("state") or "").lower()
                 if st == "paid":
                     is_paid = True
-            except Exception:
-                pass
+            except Exception as exc:  # noqa: BLE001 - deadline check is best-effort
+                logger.warning(
+                    "Hamyon holatini tekshirib bo'lmadi (order=%s): %s", order_id, exc
+                )
+                # Never cancel on an API/network error: the buyer may have paid.
+                continue
         if is_paid:
             # Payment confirmed just in time!
             info = await confirm_escrow_payment(order_id, payment_id)
             if bot and info.get("buyer") and info.get("account"):
-                login, pwd, extra = await get_credentials(order_id, info["order"]["buyer_id"])
+                login, pwd, _extra = await get_credentials(order_id, info["order"]["buyer_id"])
                 from services import notifications
                 await notifications.notify(
                     bot,
@@ -624,12 +679,161 @@ async def expire_pending_orders(bot=None) -> list[dict]:
             if payment_id:
                 try:
                     await hamyon_service.cancel_payment(payment_id)
-                except Exception:
-                    pass
+                except Exception as exc:  # noqa: BLE001 - cancel is best-effort
+                    logger.warning(
+                        "Hamyon to'lovini bekor qilib bo'lmadi (order=%s): %s",
+                        order_id,
+                        exc,
+                    )
             cancelled = await cancel_expired_order(order_id)
             if cancelled:
                 expired_events.append(cancelled)
     return expired_events
+
+
+async def handle_late_order_payment(order_id: int, payment_id: str) -> dict | None:
+    """Accept a payment that arrived after the 5-minute order deadline.
+
+    If the account is still available the order is revived; otherwise the
+    paid amount is credited to the buyer's wallet so the money is never lost.
+    """
+    now = utcnow()
+    now_iso = utcnow_iso()
+    check_deadline = (now + timedelta(minutes=CHECK_MINUTES)).isoformat(timespec="seconds")
+    auto_complete_at = (
+        now + timedelta(minutes=CHECK_MINUTES + AUTO_COMPLETE_MINUTES)
+    ).isoformat(timespec="seconds")
+    reference = f"latepay:{payment_id}"
+
+    async with db.transaction() as ex:
+        order = await ex.fetchone("SELECT * FROM orders WHERE id = ?", (order_id,))
+        if order is None:
+            return None
+        buyer = await ex.fetchone(
+            "SELECT tg_id, lang FROM users WHERE id = ?", (order["buyer_id"],)
+        )
+        seller = await ex.fetchone(
+            "SELECT tg_id, lang FROM users WHERE id = ?", (order["seller_id"],)
+        )
+        base = {
+            "order": order,
+            "buyer": buyer,
+            "seller": seller,
+            "payment_id": payment_id,
+            "amount": int(order.get("payment_amount") or order["price"]),
+        }
+        if order["status"] != "cancelled":
+            base["action"] = "already"
+            return base
+
+        duplicate = await ex.fetchone(
+            "SELECT id FROM transactions WHERE reference = ?", (reference,)
+        )
+        if duplicate is not None:
+            base["action"] = "already"
+            return base
+
+        account = await ex.fetchone(
+            "SELECT * FROM accounts WHERE id = ?", (order["account_id"],)
+        )
+        claimed = 0
+        if account is not None and account["status"] == "active":
+            claimed = await ex.execute(
+                "UPDATE accounts SET status = 'sold', sold_at = ?, updated_at = ? "
+                "WHERE id = ? AND status = 'active'",
+                (now_iso, now_iso, account["id"]),
+            )
+
+        if claimed:
+            await ex.execute(
+                "UPDATE orders SET status = 'checking', payment_id = ?, "
+                "check_deadline = ?, auto_complete_at = ?, completed_at = NULL, "
+                "updated_at = ? WHERE id = ? AND status = 'cancelled'",
+                (payment_id, check_deadline, auto_complete_at, now_iso, order_id),
+            )
+            await ex.execute(
+                "UPDATE payments SET status = 'paid', completed_at = ?, updated_at = ? "
+                "WHERE payment_id = ?",
+                (now_iso, now_iso, payment_id),
+            )
+            await ex.execute(
+                "INSERT INTO transactions "
+                "(user_id, order_id, amount, type, mode, reference, description, created_at) "
+                "VALUES (?, ?, ?, 'purchase', ?, ?, ?, ?)",
+                (
+                    order["buyer_id"],
+                    order_id,
+                    -int(order["price"]),
+                    order["mode"],
+                    f"order:{order_id}:escrow",
+                    (
+                        f"Akkaunt #{account.get('display_id', account['id'])} "
+                        "uchun kechikkan to'lov"
+                    ),
+                    now_iso,
+                ),
+            )
+            updated = await ex.fetchone("SELECT * FROM orders WHERE id = ?", (order_id,))
+            account = await ex.fetchone(
+                "SELECT * FROM accounts WHERE id = ?", (order["account_id"],)
+            )
+            base.update(
+                order=updated,
+                account=account,
+                action="reactivated",
+                amount=int(order.get("payment_amount") or order["price"]),
+            )
+            return base
+
+        amount = int(order.get("payment_amount") or order["price"])
+        await ex.execute(
+            "UPDATE payments SET status = 'paid', completed_at = ?, updated_at = ? "
+            "WHERE payment_id = ?",
+            (now_iso, now_iso, payment_id),
+        )
+        if order["mode"] == "real":
+            await ex.execute(
+                "UPDATE users SET balance = balance + ?, updated_at = ? WHERE id = ?",
+                (amount, now_iso, order["buyer_id"]),
+            )
+        else:
+            await ex.execute(
+                "UPDATE users SET test_balance = test_balance + ?, updated_at = ? "
+                "WHERE id = ?",
+                (amount, now_iso, order["buyer_id"]),
+            )
+        await ex.execute(
+            "INSERT INTO transactions "
+            "(user_id, order_id, amount, type, mode, reference, description, created_at) "
+            "VALUES (?, ?, ?, 'refund', ?, ?, ?, ?)",
+            (
+                order["buyer_id"],
+                order_id,
+                amount,
+                order["mode"],
+                reference,
+                "Buyurtma bekor qilinganidan keyin kelgan to'lov hamyonga qaytarildi",
+                now_iso,
+            ),
+        )
+        await ex.insert(
+            "INSERT INTO refunds "
+            "(order_id, payment_id, buyer_id, amount, status, reason, reference, "
+            "created_at, updated_at) "
+            "VALUES (?, ?, ?, ?, 'completed', ?, ?, ?, ?)",
+            (
+                order_id,
+                payment_id,
+                order["buyer_id"],
+                amount,
+                "Kechikkan to'lov: akkaunt sotilgan, summa hamyonga qaytarildi",
+                reference,
+                now_iso,
+                now_iso,
+            ),
+        )
+        base.update(account=account, action="credited", amount=amount)
+        return base
 
 
 async def get_order(order_id: int) -> dict | None:
@@ -639,9 +843,12 @@ async def get_order(order_id: int) -> dict | None:
 async def get_order_with_people(order_id: int) -> dict | None:
     return await db.fetchone(
         "SELECT o.*, b.tg_id AS buyer_tg, b.full_name AS buyer_name, "
-        "s.tg_id AS seller_tg, s.full_name AS seller_name, s.seller_code AS seller_code "
+        "s.tg_id AS seller_tg, s.full_name AS seller_name, s.seller_code AS seller_code, "
+        "a.display_id AS account_display_id, a.title AS account_title, "
+        "a.photo_id AS account_photo "
         "FROM orders o JOIN users b ON b.id = o.buyer_id "
-        "JOIN users s ON s.id = o.seller_id WHERE o.id = ?",
+        "JOIN users s ON s.id = o.seller_id "
+        "JOIN accounts a ON a.id = o.account_id WHERE o.id = ?",
         (order_id,),
     )
 
@@ -668,19 +875,6 @@ async def get_credentials(order_id: int, buyer_id: int) -> tuple[str, str, str]:
         raise ServiceError("Login-parolni ochishda xatolik") from exc
 
 
-async def get_credentials_admin(order_id: int) -> tuple[str, str]:
-    order = await get_order(order_id)
-    if order is None:
-        raise ServiceError("Buyurtma topilmadi")
-    account = await get_account(order["account_id"])
-    if account is None:
-        raise ServiceError("Akkaunt topilmadi")
-    try:
-        return security.decrypt(account["login_enc"]), security.decrypt(account["password_enc"])
-    except ValueError as exc:
-        raise ServiceError("Login-parolni ochishda xatolik") from exc
-
-
 async def _settle_order(ex, order: dict, new_status: str) -> dict:
     total = int(order["price"]) + int(order["penalty"])
     seller_share = total * SELLER_SHARE_PERCENT // 100
@@ -690,16 +884,17 @@ async def _settle_order(ex, order: dict, new_status: str) -> dict:
     balance_field = _balance_field(test)
 
     await ex.execute(
-        f"UPDATE users SET {balance_field} = {balance_field} + ? WHERE id = ?",
-        (seller_share, order["seller_id"]),
+        f"UPDATE users SET {balance_field} = {balance_field} + ?, updated_at = ? WHERE id = ?",
+        (seller_share, now, order["seller_id"]),
     )
     await ex.execute(
-        "UPDATE orders SET status = ?, completed_at = ? WHERE id = ?",
-        (new_status, now, order["id"]),
+        "UPDATE orders SET status = ?, completed_at = ?, updated_at = ? WHERE id = ?",
+        (new_status, now, now, order["id"]),
     )
     await ex.execute(
-        "UPDATE accounts SET status = 'sold', sold_at = COALESCE(sold_at, ?) WHERE id = ?",
-        (now, order["account_id"]),
+        "UPDATE accounts SET status = 'sold', sold_at = COALESCE(sold_at, ?), "
+        "updated_at = ? WHERE id = ?",
+        (now, now, order["account_id"]),
     )
     # Sync with seller_balances table (Section 17)
     balance_row = await ex.fetchone(
@@ -782,7 +977,12 @@ async def confirm_order(order_id: int, buyer_id: int) -> dict:
 # Automated Dispute Resolution & Cancellation (NO ADMIN INTERVENTION)
 # --------------------------------------------------------------------------
 async def request_order_cancellation(
-    order_id: int, buyer_id: int, reason: str, evidence_text: str = ""
+    order_id: int,
+    buyer_id: int,
+    reason: str,
+    evidence_text: str = "",
+    evidence_type: str = "text",
+    evidence_content: str = "",
 ) -> dict:
     """Initiates purchase cancellation (Section 10 & 11).
 
@@ -791,6 +991,10 @@ async def request_order_cancellation(
     reason = (reason or "").strip()
     if not 3 <= len(reason) <= 1000:
         raise ServiceError("Shikoyat sababi kamida 3 belgi bo'lishi kerak")
+    evidence_type = (evidence_type or "text").strip().lower()
+    if evidence_type not in ("text", "photo", "document"):
+        evidence_type = "text"
+    evidence_content = (evidence_content or evidence_text or "").strip()[:1000]
     now = utcnow_iso()
     async with db.transaction() as ex:
         order = await ex.fetchone("SELECT * FROM orders WHERE id = ?", (order_id,))
@@ -802,19 +1006,20 @@ async def request_order_cancellation(
             raise ServiceError("Faqat tekshirish jarayonidagi buyurtmani bekor qilish mumkin")
 
         await ex.execute(
-            "UPDATE orders SET status = 'disputed', cancel_requested_at = ? WHERE id = ?",
-            (now, order_id),
+            "UPDATE orders SET status = 'disputed', cancel_requested_at = ?, "
+            "updated_at = ? WHERE id = ?",
+            (now, now, order_id),
         )
         dispute_id = await ex.insert(
             "INSERT INTO disputes (order_id, buyer_id, reason, status, created_at) "
             "VALUES (?, ?, ?, 'pending', ?)",
             (order_id, buyer_id, reason, now),
         )
-        if evidence_text:
+        if evidence_content:
             await ex.insert(
                 "INSERT INTO dispute_evidence (dispute_id, sender_id, evidence_type, content, created_at) "
-                "VALUES (?, ?, 'text', ?, ?)",
-                (dispute_id, buyer_id, evidence_text[:1000], now),
+                "VALUES (?, ?, ?, ?, ?)",
+                (dispute_id, buyer_id, evidence_type, evidence_content, now),
             )
         await ex.execute(
             "UPDATE users SET active_disputes = active_disputes + 1 WHERE id IN (?, ?)",
@@ -831,33 +1036,76 @@ async def _execute_refund_inside_tx(
     total = int(order["price"]) + int(order["penalty"])
     test = order["mode"] == "test"
     balance_field = _balance_field(test)
+    reference = f"order:{order['id']}:refund"
+
+    existing = await ex.fetchone(
+        "SELECT id FROM refunds WHERE reference = ?", (reference,)
+    )
+    if existing is not None:
+        buyer = await ex.fetchone(
+            "SELECT tg_id, lang FROM users WHERE id = ?", (order["buyer_id"],)
+        )
+        seller = await ex.fetchone(
+            "SELECT tg_id, lang FROM users WHERE id = ?", (order["seller_id"],)
+        )
+        return {
+            "action": "refund",
+            "already": True,
+            "order_id": order["id"],
+            "total": total,
+            "decision": decision,
+            "decision_reason": decision_reason,
+            "buyer_tg": buyer["tg_id"] if buyer else None,
+            "buyer_lang": buyer["lang"] if buyer else None,
+            "seller_tg": seller["tg_id"] if seller else None,
+            "seller_lang": seller["lang"] if seller else None,
+        }
 
     # 1. Credit buyer balance
     await ex.execute(
         f"UPDATE users SET {balance_field} = {balance_field} + ? WHERE id = ?",
         (total, order["buyer_id"]),
     )
+    await ex.execute(
+        "UPDATE users SET active_disputes = "
+        "CASE WHEN active_disputes > 0 THEN active_disputes - 1 ELSE 0 END "
+        "WHERE id IN (?, ?)",
+        (order["buyer_id"], order["seller_id"]),
+    )
     # 2. Update order
     await ex.execute(
-        "UPDATE orders SET status = 'refunded', completed_at = ? WHERE id = ?",
-        (now, order["id"]),
+        "UPDATE orders SET status = 'refunded', completed_at = ?, updated_at = ? "
+        "WHERE id = ?",
+        (now, now, order["id"]),
     )
     # 3. Restore account status
     if restore_account:
         await ex.execute(
-            "UPDATE accounts SET status = 'active', sold_at = NULL WHERE id = ?",
-            (order["account_id"],),
+            "UPDATE accounts SET status = 'active', sold_at = NULL, updated_at = ? "
+            "WHERE id = ?",
+            (now, order["account_id"]),
         )
     else:
         await ex.execute(
-            "UPDATE accounts SET status = 'paused' WHERE id = ?",
-            (order["account_id"],),
+            "UPDATE accounts SET status = 'paused', updated_at = ? WHERE id = ?",
+            (now, order["account_id"]),
         )
     # 4. Insert refund record (Section 17 & 13)
     await ex.insert(
-        "INSERT INTO refunds (order_id, payment_id, buyer_id, amount, status, reason, created_at) "
-        "VALUES (?, ?, ?, ?, 'completed', ?, ?)",
-        (order["id"], order.get("payment_id") or "", order["buyer_id"], total, decision_reason, now),
+        "INSERT INTO refunds "
+        "(order_id, payment_id, buyer_id, amount, status, reason, reference, "
+        "created_at, updated_at) "
+        "VALUES (?, ?, ?, ?, 'completed', ?, ?, ?, ?)",
+        (
+            order["id"],
+            order.get("payment_id") or "",
+            order["buyer_id"],
+            total,
+            decision_reason,
+            reference,
+            now,
+            now,
+        ),
     )
     # 5. Insert transaction record
     await ex.execute(
@@ -869,7 +1117,7 @@ async def _execute_refund_inside_tx(
             order["id"],
             total,
             order["mode"],
-            f"order:{order['id']}:refund",
+            reference,
             f"Buyurtma #{order['id']} uchun avtomatik qaytarildi ({decision_reason})"[:500],
             now,
         ),
@@ -877,8 +1125,8 @@ async def _execute_refund_inside_tx(
     # 6. Update dispute
     await ex.execute(
         "UPDATE disputes SET status = 'refunded', auto_resolved = 1, decision = ?, "
-        "decision_reason = ?, resolved_at = ? WHERE order_id = ?",
-        (decision, decision_reason, now, order["id"]),
+        "decision_reason = ?, resolved_at = ?, updated_at = ? WHERE order_id = ?",
+        (decision, decision_reason, now, now, order["id"]),
     )
     buyer = await ex.fetchone("SELECT tg_id, lang FROM users WHERE id = ?", (order["buyer_id"],))
     seller = await ex.fetchone("SELECT tg_id, lang FROM users WHERE id = ?", (order["seller_id"],))
@@ -920,8 +1168,9 @@ async def handle_seller_dispute_response(order_id: int, seller_id: int, response
 
         now = utcnow_iso()
         await ex.execute(
-            "UPDATE disputes SET seller_response = ?, seller_response_at = ? WHERE order_id = ?",
-            (choice_str, now, order_id),
+            "UPDATE disputes SET seller_response = ?, seller_response_at = ?, "
+            "updated_at = ? WHERE order_id = ?",
+            (choice_str, now, now, order_id),
         )
         await ex.execute(
             "UPDATE orders SET seller_response = ?, seller_response_at = ? WHERE id = ?",
@@ -946,6 +1195,12 @@ async def handle_seller_dispute_response(order_id: int, seller_id: int, response
             seller_failed = int(seller.get("failed_disputes") or 0)
             seller_sales = int(seller.get("rating_count") or 0)
             buyer_failed = int(buyer.get("failed_disputes") or 0)
+            evidence_row = await ex.fetchone(
+                "SELECT COUNT(*) AS c FROM dispute_evidence "
+                "WHERE dispute_id = ? AND evidence_type IN ('text', 'photo', 'document')",
+                (dispute["id"],),
+            )
+            has_evidence = bool(evidence_row and int(evidence_row["c"]) > 0)
 
             if seller_failed >= 2:
                 # Repeatedly problematic seller: favor buyer
@@ -954,6 +1209,16 @@ async def handle_seller_dispute_response(order_id: int, seller_id: int, response
                 await ex.execute(
                     "UPDATE users SET failed_disputes = failed_disputes + 1 WHERE id = ?",
                     (seller_id,),
+                )
+                result = await _execute_refund_inside_tx(
+                    ex, order, dispute, decision, decision_reason, restore_account=False
+                )
+                return result
+
+            if has_evidence:
+                decision = "buyer_refunded"
+                decision_reason = (
+                    "Xaridor taqdim etgan dalillar sotuvchining e'tirozidan ustun deb baholandi"
                 )
                 result = await _execute_refund_inside_tx(
                     ex, order, dispute, decision, decision_reason, restore_account=False
@@ -970,9 +1235,15 @@ async def handle_seller_dispute_response(order_id: int, seller_id: int, response
                 )
                 result = await _settle_order(ex, order, "completed")
                 await ex.execute(
+                    "UPDATE users SET active_disputes = "
+                    "CASE WHEN active_disputes > 0 THEN active_disputes - 1 ELSE 0 END "
+                    "WHERE id IN (?, ?)",
+                    (order["buyer_id"], order["seller_id"]),
+                )
+                await ex.execute(
                     "UPDATE disputes SET status = 'released', auto_resolved = 1, decision = ?, "
-                    "decision_reason = ?, resolved_at = ? WHERE order_id = ?",
-                    (decision, decision_reason, now, order_id),
+                    "decision_reason = ?, resolved_at = ?, updated_at = ? WHERE order_id = ?",
+                    (decision, decision_reason, now, now, order_id),
                 )
                 result["action"] = "release"
                 result["decision"] = decision
@@ -984,8 +1255,8 @@ async def handle_seller_dispute_response(order_id: int, seller_id: int, response
             decision_reason = "Dalillar yetarli emas: mablag' xavfsiz hold holatida saqlanmoqda"
             await ex.execute(
                 "UPDATE disputes SET status = 'locked_hold', auto_resolved = 1, decision = ?, "
-                "decision_reason = ?, resolved_at = ? WHERE order_id = ?",
-                (decision, decision_reason, now, order_id),
+                "decision_reason = ?, resolved_at = ?, updated_at = ? WHERE order_id = ?",
+                (decision, decision_reason, now, now, order_id),
             )
             return {
                 "action": "hold",
@@ -1027,8 +1298,20 @@ async def check_dispute_timeouts(bot=None) -> list[dict]:
     return resolved_events
 
 
-async def create_dispute(order_id: int, buyer_id: int, reason: str) -> dict:
-    return await request_order_cancellation(order_id, buyer_id, reason)
+async def create_dispute(
+    order_id: int,
+    buyer_id: int,
+    reason: str,
+    evidence_type: str = "text",
+    evidence_content: str = "",
+) -> dict:
+    return await request_order_cancellation(
+        order_id,
+        buyer_id,
+        reason,
+        evidence_type=evidence_type,
+        evidence_content=evidence_content,
+    )
 
 
 async def accrue_penalties() -> list[dict]:
@@ -1172,83 +1455,6 @@ async def accrue_penalties() -> list[dict]:
     return events
 
 
-async def resolve_dispute(order_id: int, action: str, admin_tg_id: int) -> dict:
-    if action not in ("refund", "release"):
-        raise ServiceError("Noto'g'ri amal")
-    async with db.transaction() as ex:
-        order = await ex.fetchone("SELECT * FROM orders WHERE id = ?", (order_id,))
-        dispute = await ex.fetchone(
-            "SELECT * FROM disputes WHERE order_id = ?", (order_id,)
-        )
-        if order is None or dispute is None:
-            raise ServiceError("Shikoyat topilmadi")
-        if dispute["status"] != "pending":
-            raise ServiceError("Bu shikoyat allaqachon hal qilingan")
-        if order["status"] != "disputed":
-            raise ServiceError("Buyurtma shikoyat holatida emas")
-
-        now = utcnow_iso()
-        if action == "refund":
-            total = int(order["price"]) + int(order["penalty"])
-            test = order["mode"] == "test"
-            balance_field = _balance_field(test)
-            await ex.execute(
-                f"UPDATE users SET {balance_field} = {balance_field} + ? WHERE id = ?",
-                (total, order["buyer_id"]),
-            )
-            await ex.execute(
-                "UPDATE orders SET status = 'refunded', completed_at = ? WHERE id = ?",
-                (now, order_id),
-            )
-            await ex.execute(
-                "UPDATE accounts SET status = 'active', sold_at = NULL WHERE id = ?",
-                (order["account_id"],),
-            )
-            await ex.execute(
-                "INSERT INTO transactions "
-                "(user_id, order_id, amount, type, mode, reference, description, created_at) "
-                "VALUES (?, ?, ?, 'refund', ?, ?, ?, ?)",
-                (
-                    order["buyer_id"],
-                    order_id,
-                    total,
-                    order["mode"],
-                    f"order:{order_id}:refund",
-                    f"Buyurtma #{order_id} uchun pul qaytarildi",
-                    now,
-                ),
-            )
-            await ex.execute(
-                "UPDATE disputes SET status = 'refunded', resolved_by = ?, resolved_at = ? "
-                "WHERE order_id = ?",
-                (admin_tg_id, now, order_id),
-            )
-            buyer = await ex.fetchone(
-                "SELECT tg_id, lang FROM users WHERE id = ?", (order["buyer_id"],)
-            )
-            seller = await ex.fetchone(
-                "SELECT tg_id, lang FROM users WHERE id = ?", (order["seller_id"],)
-            )
-            return {
-                "action": "refund",
-                "order_id": order_id,
-                "total": total,
-                "buyer_tg": buyer["tg_id"] if buyer else None,
-                "buyer_lang": buyer["lang"] if buyer else None,
-                "seller_tg": seller["tg_id"] if seller else None,
-                "seller_lang": seller["lang"] if seller else None,
-            }
-
-        info = await _settle_order(ex, order, "completed")
-        await ex.execute(
-            "UPDATE disputes SET status = 'released', resolved_by = ?, resolved_at = ? "
-            "WHERE order_id = ?",
-            (admin_tg_id, now, order_id),
-        )
-        info["action"] = "release"
-        return info
-
-
 async def list_buyer_orders(buyer_id: int, limit: int = 20) -> list[dict]:
     return await db.fetchall(
         "SELECT o.*, a.title AS title, a.price AS account_price, "
@@ -1288,10 +1494,12 @@ async def list_recent_sales(limit: int = 20) -> list[dict]:
 async def get_dispute_details(order_id: int) -> dict | None:
     return await db.fetchone(
         "SELECT d.*, o.price, o.penalty, o.status AS order_status, o.account_id, "
+        "a.display_id AS account_display_id, "
         "b.tg_id AS buyer_tg, b.full_name AS buyer_name, b.lang AS buyer_lang, "
         "s.tg_id AS seller_tg, s.full_name AS seller_name, s.seller_code, "
         "s.lang AS seller_lang "
         "FROM disputes d JOIN orders o ON o.id = d.order_id "
+        "JOIN accounts a ON a.id = o.account_id "
         "JOIN users b ON b.id = d.buyer_id JOIN users s ON s.id = o.seller_id "
         "WHERE d.order_id = ?",
         (order_id,),
@@ -1301,9 +1509,11 @@ async def get_dispute_details(order_id: int) -> dict | None:
 async def list_pending_disputes(limit: int = 10) -> list[dict]:
     return await db.fetchall(
         "SELECT d.*, o.price, o.penalty, o.status AS order_status, o.account_id, "
+        "a.display_id AS account_display_id, "
         "b.tg_id AS buyer_tg, b.full_name AS buyer_name, "
         "s.tg_id AS seller_tg, s.full_name AS seller_name, s.seller_code "
         "FROM disputes d JOIN orders o ON o.id = d.order_id "
+        "JOIN accounts a ON a.id = o.account_id "
         "JOIN users b ON b.id = d.buyer_id JOIN users s ON s.id = o.seller_id "
         "WHERE d.status = 'pending' ORDER BY d.id ASC LIMIT ?",
         (limit,),

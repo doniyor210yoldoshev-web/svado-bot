@@ -23,37 +23,210 @@ RECEIPT_TYPES = ("photo", "document", "text")
 
 
 async def wallet_summary(user: dict) -> dict:
+    """Hamyon xulosasi: balans, kirim, chiqim, kutilayotgan yechish."""
+    # Jami kirim (barcha topup tranzaksiyalari)
+    total_in_row = await db.fetchone(
+        "SELECT COALESCE(SUM(amount),0) AS total FROM transactions "
+        "WHERE user_id = ? AND amount > 0 AND mode = 'real'",
+        (user["id"],),
+    )
+    # Jami chiqim (barcha manfiy tranzaksiyalar)
+    total_out_row = await db.fetchone(
+        "SELECT COALESCE(SUM(-amount),0) AS total FROM transactions "
+        "WHERE user_id = ? AND amount < 0 AND mode = 'real'",
+        (user["id"],),
+    )
+    # Savdo daromadi
     earned = await db.fetchone(
         "SELECT COALESCE(SUM(amount),0) AS total FROM transactions "
         "WHERE user_id = ? AND type = 'sale' AND mode = 'real'",
         (user["id"],),
     )
+    # Xarid xarajatlar
     spent = await db.fetchone(
         "SELECT COALESCE(SUM(-amount),0) AS total FROM transactions "
         "WHERE user_id = ? AND type = 'purchase' AND mode = 'real'",
         (user["id"],),
     )
+    # Kutilayotgan yechish
     pending_out = await db.fetchone(
         "SELECT COALESCE(SUM(amount),0) AS total FROM withdrawals "
         "WHERE user_id = ? AND status = 'pending'",
+        (user["id"],),
+    )
+    # Kutilayotgan to'ldirishlar (hali balansga qo'shilmagan)
+    pending_in = await db.fetchone(
+        "SELECT COALESCE(SUM(amount),0) AS total FROM topups "
+        "WHERE user_id = ? AND status = 'pending'",
+        (user["id"],),
+    )
+    # Tranzaksiyalar soni
+    tx_count_row = await db.fetchone(
+        "SELECT COUNT(*) AS cnt FROM transactions WHERE user_id = ? AND mode = 'real'",
         (user["id"],),
     )
     return {
         "balance": int(user["balance"]),
         "test_balance": int(user["test_balance"]),
         "test_mode": bool(user["test_mode"]),
+        "total_in": int(total_in_row["total"]) if total_in_row else 0,
+        "total_out": int(total_out_row["total"]) if total_out_row else 0,
         "earned": int(earned["total"]) if earned else 0,
         "spent": int(spent["total"]) if spent else 0,
+        "pending_topups": int(pending_in["total"]) if pending_in else 0,
         "pending_withdrawals": int(pending_out["total"]) if pending_out else 0,
+        "tx_count": int(tx_count_row["cnt"]) if tx_count_row else 0,
     }
 
 
-async def list_transactions(user_id: int, mode: str = "real", limit: int = 15) -> list[dict]:
+async def list_transactions(user_id: int, mode: str = "real", limit: int = 20) -> list[dict]:
+    """Foydalanuvchi tranzaksiyalar tarixi — eng yangilari birinchi."""
     return await db.fetchall(
         "SELECT * FROM transactions WHERE user_id = ? AND mode = ? "
         "ORDER BY id DESC LIMIT ?",
         (user_id, mode, limit),
     )
+
+
+async def get_transaction(tx_id: int, user_id: int) -> dict | None:
+    """Bitta tranzaksiyani olish (foydalanuvchi o'ziga tegishligini tekshirib)."""
+    return await db.fetchone(
+        "SELECT * FROM transactions WHERE id = ? AND user_id = ?",
+        (tx_id, user_id),
+    )
+
+
+async def get_wallet(user_id: int) -> dict | None:
+    """Wallet row for a user (kept in sync with ``users.balance`` by triggers)."""
+    return await db.fetchone(
+        "SELECT w.*, u.tg_id, u.full_name, u.username "
+        "FROM wallets w JOIN users u ON u.id = w.user_id WHERE w.user_id = ?",
+        (user_id,),
+    )
+
+
+async def list_wallets(limit: int = 10, offset: int = 0) -> list[dict]:
+    """Admin: barcha foydalanuvchilar hamyonlari (balans bo'yicha kamayish)."""
+    return await db.fetchall(
+        "SELECT w.*, u.tg_id, u.full_name, u.username, u.seller_code "
+        "FROM wallets w JOIN users u ON u.id = w.user_id "
+        "ORDER BY w.balance DESC, w.user_id ASC LIMIT ? OFFSET ?",
+        (limit, max(0, offset)),
+    )
+
+
+async def count_wallets() -> int:
+    row = await db.fetchone("SELECT COUNT(*) AS cnt FROM wallets")
+    return int(row["cnt"]) if row else 0
+
+
+async def list_all_transactions(limit: int = 10, offset: int = 0) -> list[dict]:
+    """Admin: barcha tranzaksiyalar (foydalanuvchi ma'lumotlari bilan)."""
+    return await db.fetchall(
+        "SELECT t.*, u.tg_id AS user_tg, u.full_name AS user_name, "
+        "u.username AS user_username "
+        "FROM transactions t LEFT JOIN users u ON u.id = t.user_id "
+        "ORDER BY t.id DESC LIMIT ? OFFSET ?",
+        (limit, max(0, offset)),
+    )
+
+
+async def count_transactions() -> int:
+    row = await db.fetchone("SELECT COUNT(*) AS cnt FROM transactions")
+    return int(row["cnt"]) if row else 0
+
+
+async def list_wallet_audit_logs(limit: int = 20) -> list[dict]:
+    """Admin tomonidan balansga qilingan barcha aralashuvlar tarixi."""
+    return await db.fetchall(
+        "SELECT a.*, u.tg_id AS user_tg, u.full_name AS user_name "
+        "FROM wallet_audit_logs a LEFT JOIN users u ON u.id = a.user_id "
+        "ORDER BY a.id DESC LIMIT ?",
+        (limit,),
+    )
+
+
+async def _wallet_audit(
+    ex,
+    user_id: int,
+    actor_tg: int | None,
+    action: str,
+    amount: int,
+    balance_before: int,
+    balance_after: int,
+    note: str,
+    reference: str,
+) -> None:
+    await ex.execute(
+        "INSERT INTO wallet_audit_logs "
+        "(user_id, actor_tg, action, amount, balance_before, balance_after, "
+        "note, reference, created_at) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        (
+            user_id,
+            actor_tg,
+            action,
+            amount,
+            balance_before,
+            balance_after,
+            (note or "")[:500],
+            reference,
+            utcnow_iso(),
+        ),
+    )
+
+
+async def purchase_via_wallet(
+    buyer_id: int, account_id: int, price: int, order_id: int, test_mode: bool = False
+) -> dict:
+    """Hamyon balansidan xarid qilish (atomic).
+
+    Agar balansi yetarli bo'lmasa — InsufficientFunds xatosi qaytaradi.
+    Muvaffaqiyatli bo'lsa — transaction yozuvi yaratiladi va order holati yangilanadi.
+    """
+    balance_field = "test_balance" if test_mode else "balance"
+    tx_mode = "test" if test_mode else "real"
+
+    async with db.transaction() as ex:
+        user = await ex.fetchone("SELECT * FROM users WHERE id = ?", (buyer_id,))
+        if user is None:
+            raise ServiceError("Foydalanuvchi topilmadi")
+        current_balance = int(user[balance_field])
+        if current_balance < price:
+            raise InsufficientFunds(price, current_balance)
+
+        # Atomik: balansni yechish
+        updated = await ex.execute(
+            f"UPDATE users SET {balance_field} = {balance_field} - ?, updated_at = ? "
+            f"WHERE id = ? AND {balance_field} >= ?",
+            (price, utcnow_iso(), buyer_id, price),
+        )
+        if updated == 0:
+            raise InsufficientFunds(price, current_balance)
+
+        # Tranzaksiya yozuvi
+        ref = security.generate_reference("purchase")
+        await ex.execute(
+            "INSERT INTO transactions "
+            "(user_id, order_id, amount, type, mode, reference, description, created_at) "
+            "VALUES (?, ?, ?, 'purchase', ?, ?, ?, ?)",
+            (
+                buyer_id,
+                order_id,
+                -price,
+                tx_mode,
+                ref,
+                f"Akkaunt xaridi (buyurtma #{order_id})",
+                utcnow_iso(),
+            ),
+        )
+
+        updated_user = await ex.fetchone("SELECT * FROM users WHERE id = ?", (buyer_id,))
+        return {
+            "new_balance": int(updated_user[balance_field]) if updated_user else 0,
+            "deducted": price,
+            "reference": ref,
+        }
 
 
 # --------------------------------------------------------------------------
@@ -77,11 +250,12 @@ async def create_topup(
     if receipt_type not in RECEIPT_TYPES or not (receipt_value or "").strip():
         raise ServiceError("To'lov chekini yuborishingiz kerak")
     payment_instructions()
+    public_id = security.generate_payment_id()
     topup_id = await db.insert(
         "INSERT INTO topups "
-        "(user_id, amount, receipt_type, receipt_value, status, mode, created_at) "
-        "VALUES (?, ?, ?, ?, 'pending', 'real', ?)",
-        (user_id, amount, receipt_type, receipt_value.strip(), utcnow_iso()),
+        "(public_id, user_id, amount, receipt_type, receipt_value, status, mode, created_at) "
+        "VALUES (?, ?, ?, ?, ?, 'pending', 'real', ?)",
+        (public_id, user_id, amount, receipt_type, receipt_value.strip(), utcnow_iso()),
     )
     return await db.fetchone("SELECT * FROM topups WHERE id = ?", (topup_id,))
 
@@ -92,11 +266,12 @@ async def create_click_topup(user_id: int, amount: int) -> dict:
         raise ServiceError(
             f"To'ldirish miqdori {fmt_sum(MIN_TOPUP)} va {fmt_sum(MAX_TOPUP)} orasida bo'lishi kerak"
         )
+    public_id = security.generate_payment_id()
     topup_id = await db.insert(
         "INSERT INTO topups "
-        "(user_id, amount, receipt_type, receipt_value, status, mode, created_at) "
-        "VALUES (?, ?, 'click', '', 'pending', 'real', ?)",
-        (user_id, amount, utcnow_iso()),
+        "(public_id, user_id, amount, receipt_type, receipt_value, status, mode, created_at) "
+        "VALUES (?, ?, ?, 'click', '', 'pending', 'real', ?)",
+        (public_id, user_id, amount, utcnow_iso()),
     )
     row = await db.fetchone("SELECT * FROM topups WHERE id = ?", (topup_id,))
     if row is None:
@@ -187,21 +362,31 @@ async def complete_click_topup(
 # --------------------------------------------------------------------------
 # HamyonAPI top-ups
 # --------------------------------------------------------------------------
-async def _unique_hamyon_amount(amount: int) -> int:
+async def unique_hamyon_amount(amount: int, exclude_order_id: int | None = None) -> int:
     """HamyonAPI allows only one open payment per amount per shop.
 
     When a collision happens the amount is nudged by 1 so'm (the official
-    recommendation) until a free value is found.
+    recommendation) until a free value is found. Open escrow orders are
+    included because their payment uses the same shop.
     """
-    candidate = amount
+    candidate = int(amount)
     for _ in range(50):
-        row = await db.fetchone(
+        topup = await db.fetchone(
             "SELECT id FROM topups "
             "WHERE receipt_type = 'hamyon' AND status = 'pending' "
             "AND mode = 'real' AND amount = ?",
             (candidate,),
         )
-        if row is None:
+        if topup is not None:
+            candidate += 1
+            continue
+        order = await db.fetchone(
+            "SELECT id FROM orders "
+            "WHERE status = 'pending_payment' AND mode = 'real' "
+            "AND COALESCE(payment_amount, price) = ? AND id <> ?",
+            (candidate, exclude_order_id or 0),
+        )
+        if order is None:
             return candidate
         candidate += 1
     raise ServiceError(
@@ -219,12 +404,13 @@ async def create_hamyon_topup(user_id: int, amount: int) -> dict:
         raise ServiceError(
             f"To'ldirish miqdori {fmt_sum(MIN_TOPUP)} va {fmt_sum(MAX_TOPUP)} orasida bo'lishi kerak"
         )
-    unique_amount = await _unique_hamyon_amount(amount)
+    unique_amount = await unique_hamyon_amount(amount)
+    public_id = security.generate_payment_id()
     topup_id = await db.insert(
         "INSERT INTO topups "
-        "(user_id, amount, receipt_type, receipt_value, status, mode, created_at) "
-        "VALUES (?, ?, 'hamyon', '', 'pending', 'real', ?)",
-        (user_id, unique_amount, utcnow_iso()),
+        "(public_id, user_id, amount, receipt_type, receipt_value, status, mode, created_at) "
+        "VALUES (?, ?, ?, 'hamyon', '', 'pending', 'real', ?)",
+        (public_id, user_id, unique_amount, utcnow_iso()),
     )
     row = await db.fetchone("SELECT * FROM topups WHERE id = ?", (topup_id,))
     if row is None:
@@ -357,29 +543,49 @@ async def approve_topup(topup_id: int, admin_tg: int) -> dict:
             raise ServiceError("To'lov topilmadi")
         if topup["status"] != "pending":
             raise ServiceError("Bu to'lov allaqachon ko'rib chiqilgan")
-        await ex.execute(
-            "UPDATE users SET balance = balance + ? WHERE id = ?",
-            (topup["amount"], topup["user_id"]),
+        now = utcnow_iso()
+        # Conditional update: only one concurrent approval can win, so a
+        # double-click can never credit the wallet twice.
+        updated = await ex.execute(
+            "UPDATE topups SET status = 'approved', reviewed_by = ?, reviewed_at = ?, "
+            "updated_at = ? WHERE id = ? AND status = 'pending'",
+            (admin_tg, now, now, topup_id),
         )
-        await ex.execute(
-            "UPDATE topups SET status = 'approved', reviewed_by = ?, reviewed_at = ? "
-            "WHERE id = ?",
-            (admin_tg, utcnow_iso(), topup_id),
+        if updated == 0:
+            raise ServiceError("Bu to'lov allaqachon ko'rib chiqilgan")
+        user = await ex.fetchone(
+            "SELECT * FROM users WHERE id = ?", (topup["user_id"],)
         )
+        if user is None:
+            raise ServiceError("Foydalanuvchi topilmadi")
+        before = int(user["balance"])
+        await ex.execute(
+            "UPDATE users SET balance = balance + ?, updated_at = ? WHERE id = ?",
+            (int(topup["amount"]), now, topup["user_id"]),
+        )
+        reference = f"topup:{topup_id}"
         await ex.execute(
             "INSERT INTO transactions "
-            "(user_id, amount, type, mode, reference, description, created_at) "
-            "VALUES (?, ?, 'topup', 'real', ?, ?, ?)",
+            "(user_id, amount, type, mode, status, reference, description, created_at) "
+            "VALUES (?, ?, 'topup', 'real', 'completed', ?, ?, ?)",
             (
                 topup["user_id"],
                 int(topup["amount"]),
-                f"topup:{topup_id}",
-                f"Balans to'ldirildi (to'lov #{topup_id})",
-                utcnow_iso(),
+                reference,
+                f"Balans to'ldirildi (to'lov #{topup.get('public_id') or topup_id})",
+                now,
             ),
         )
-        user = await ex.fetchone(
-            "SELECT tg_id, lang FROM users WHERE id = ?", (topup["user_id"],)
+        await _wallet_audit(
+            ex,
+            topup["user_id"],
+            admin_tg,
+            "topup.approve",
+            int(topup["amount"]),
+            before,
+            before + int(topup["amount"]),
+            f"To'lov #{topup.get('public_id') or topup_id} tasdiqlandi",
+            reference,
         )
         return {
             "topup_id": topup_id,
@@ -396,14 +602,29 @@ async def reject_topup(topup_id: int, admin_tg: int, reason: str = "") -> dict:
             raise ServiceError("To'lov topilmadi")
         if topup["status"] != "pending":
             raise ServiceError("Bu to'lov allaqachon ko'rib chiqilgan")
-        await ex.execute(
-            "UPDATE topups SET status = 'rejected', reviewed_by = ?, reviewed_at = ? "
-            "WHERE id = ?",
-            (admin_tg, utcnow_iso(), topup_id),
+        now = utcnow_iso()
+        updated = await ex.execute(
+            "UPDATE topups SET status = 'rejected', reviewed_by = ?, reviewed_at = ?, "
+            "updated_at = ? WHERE id = ? AND status = 'pending'",
+            (admin_tg, now, now, topup_id),
         )
+        if updated == 0:
+            raise ServiceError("Bu to'lov allaqachon ko'rib chiqilgan")
         user = await ex.fetchone(
-            "SELECT tg_id, lang FROM users WHERE id = ?", (topup["user_id"],)
+            "SELECT tg_id, lang, balance FROM users WHERE id = ?", (topup["user_id"],)
         )
+        if user is not None:
+            await _wallet_audit(
+                ex,
+                topup["user_id"],
+                admin_tg,
+                "topup.reject",
+                0,
+                int(user["balance"]),
+                int(user["balance"]),
+                (reason or f"To'lov #{topup.get('public_id') or topup_id} rad etildi")[:500],
+                f"topup:{topup_id}",
+            )
         return {
             "topup_id": topup_id,
             "amount": int(topup["amount"]),
@@ -432,11 +653,18 @@ async def create_withdrawal(user_id: int, amount: int, card_number: str) -> dict
         if int(user["balance"]) < amount:
             raise InsufficientFunds(amount, int(user["balance"]))
         debited = await ex.execute(
-            "UPDATE users SET balance = balance - ? WHERE id = ? AND balance >= ?",
-            (amount, user_id, amount),
+            "UPDATE users SET balance = balance - ?, updated_at = ? "
+            "WHERE id = ? AND balance >= ?",
+            (amount, utcnow_iso(), user_id, amount),
         )
         if debited == 0:
             raise InsufficientFunds(amount, int(user["balance"]))
+        await ex.execute(
+            "UPDATE seller_balances SET available_balance = "
+            "CASE WHEN available_balance >= ? THEN available_balance - ? ELSE 0 END, "
+            "updated_at = ? WHERE seller_id = ?",
+            (amount, amount, utcnow_iso(), user_id),
+        )
         withdrawal_id = await ex.insert(
             "INSERT INTO withdrawals "
             "(user_id, amount, card_number, status, mode, created_at) "
@@ -459,36 +687,76 @@ async def create_withdrawal(user_id: int, amount: int, card_number: str) -> dict
 
 
 async def admin_adjust_balance(
-    user_id: int, amount: int, note: str, admin_tg: int
+    user_id: int,
+    amount: int,
+    note: str,
+    admin_tg: int,
+    tx_type: str = "adjustment",
 ) -> tuple[dict, int]:
+    """Atomically credit/debit a wallet and write an audit trail.
+
+    A conditional ``UPDATE`` guarantees the balance can never go negative, even
+    when two admins act at the same time. Every manual change is stored both as
+    a transaction and in ``wallet_audit_logs``.
+    """
     if amount == 0:
         raise ServiceError("Summa nolga teng bo'lishi mumkin emas")
+    if tx_type not in ("adjustment", "refund"):
+        raise ServiceError("Noto'g'ri tranzaksiya turi")
     async with db.transaction() as ex:
         user = await ex.fetchone("SELECT * FROM users WHERE id = ?", (user_id,))
         if user is None:
             raise ServiceError("Foydalanuvchi topilmadi")
-        new_balance = int(user["balance"]) + amount
-        if new_balance < 0:
-            raise ServiceError("Balans manfiy bo'lib qoladi")
-        await ex.execute(
-            "UPDATE users SET balance = ? WHERE id = ?", (new_balance, user_id)
+        before = int(user["balance"])
+        now = utcnow_iso()
+        updated_count = await ex.execute(
+            "UPDATE users SET balance = balance + ?, updated_at = ? "
+            "WHERE id = ? AND balance + ? >= 0",
+            (amount, now, user_id, amount),
         )
+        if updated_count == 0:
+            raise ServiceError("Balans manfiy bo'lib qoladi")
+        new_balance = before + amount
+        reference = security.generate_reference(tx_type)
+        description = (note or f"Admin {admin_tg} tomonidan tuzatish")[:500]
         await ex.execute(
             "INSERT INTO transactions "
-            "(user_id, amount, type, mode, reference, description, created_at) "
-            "VALUES (?, ?, 'adjustment', 'real', ?, ?, ?)",
-            (
-                user_id,
-                amount,
-                security.generate_reference("adjustment"),
-                (note or f"Admin {admin_tg} tomonidan tuzatish")[:500],
-                utcnow_iso(),
-            ),
+            "(user_id, amount, type, mode, status, reference, description, created_at) "
+            "VALUES (?, ?, ?, 'real', 'completed', ?, ?, ?)",
+            (user_id, amount, tx_type, reference, description, now),
+        )
+        await ex.execute(
+            "UPDATE seller_balances SET available_balance = "
+            "CASE WHEN available_balance + ? >= 0 THEN available_balance + ? ELSE 0 END, "
+            "updated_at = ? WHERE seller_id = ?",
+            (amount, amount, now, user_id),
+        )
+        await _wallet_audit(
+            ex,
+            user_id,
+            admin_tg,
+            f"wallet.{tx_type}",
+            amount,
+            before,
+            new_balance,
+            description,
+            reference,
         )
         updated = await ex.fetchone("SELECT * FROM users WHERE id = ?", (user_id,))
         if updated is None:
             raise ServiceError("Foydalanuvchi topilmadi")
         return updated, new_balance
+
+
+async def admin_refund_wallet(
+    user_id: int, amount: int, note: str, admin_tg: int
+) -> tuple[dict, int]:
+    """Admin tomonidan foydalanuvchi hamyoniga pul qaytarish."""
+    if amount <= 0:
+        raise ServiceError("Qaytarish summasi musbat bo'lishi kerak")
+    return await admin_adjust_balance(
+        user_id, amount, note or "Admin tomonidan qaytarish", admin_tg, tx_type="refund"
+    )
 
 
 async def list_user_withdrawals(user_id: int, limit: int = 10) -> list[dict]:
@@ -525,11 +793,14 @@ async def approve_withdrawal(withdrawal_id: int, admin_tg: int) -> dict:
             raise ServiceError("So'rov topilmadi")
         if withdrawal["status"] != "pending":
             raise ServiceError("Bu so'rov allaqachon ko'rib chiqilgan")
-        await ex.execute(
-            "UPDATE withdrawals SET status = 'paid', reviewed_by = ?, reviewed_at = ? "
-            "WHERE id = ?",
-            (admin_tg, utcnow_iso(), withdrawal_id),
+        now = utcnow_iso()
+        updated = await ex.execute(
+            "UPDATE withdrawals SET status = 'paid', reviewed_by = ?, reviewed_at = ?, "
+            "updated_at = ? WHERE id = ? AND status = 'pending'",
+            (admin_tg, now, now, withdrawal_id),
         )
+        if updated == 0:
+            raise ServiceError("Bu so'rov allaqachon ko'rib chiqilgan")
         user = await ex.fetchone(
             "SELECT tg_id, lang FROM users WHERE id = ?", (withdrawal["user_id"],)
         )
@@ -551,29 +822,50 @@ async def reject_withdrawal(withdrawal_id: int, admin_tg: int, reason: str = "")
             raise ServiceError("So'rov topilmadi")
         if withdrawal["status"] != "pending":
             raise ServiceError("Bu so'rov allaqachon ko'rib chiqilgan")
+        now = utcnow_iso()
+        updated = await ex.execute(
+            "UPDATE withdrawals SET status = 'rejected', reviewed_by = ?, reviewed_at = ?, "
+            "updated_at = ? WHERE id = ? AND status = 'pending'",
+            (admin_tg, now, now, withdrawal_id),
+        )
+        if updated == 0:
+            raise ServiceError("Bu so'rov allaqachon ko'rib chiqilgan")
+        user = await ex.fetchone(
+            "SELECT * FROM users WHERE id = ?", (withdrawal["user_id"],)
+        )
+        before = int(user["balance"]) if user else 0
         await ex.execute(
-            "UPDATE users SET balance = balance + ? WHERE id = ?",
-            (withdrawal["amount"], withdrawal["user_id"]),
+            "UPDATE users SET balance = balance + ?, updated_at = ? WHERE id = ?",
+            (withdrawal["amount"], now, withdrawal["user_id"]),
         )
         await ex.execute(
-            "UPDATE withdrawals SET status = 'rejected', reviewed_by = ?, reviewed_at = ? "
-            "WHERE id = ?",
-            (admin_tg, utcnow_iso(), withdrawal_id),
+            "UPDATE seller_balances SET available_balance = available_balance + ?, "
+            "updated_at = ? WHERE seller_id = ?",
+            (withdrawal["amount"], now, withdrawal["user_id"]),
         )
+        reference = f"withdrawal:{withdrawal_id}:refund"
         await ex.execute(
             "INSERT INTO transactions "
-            "(user_id, amount, type, mode, reference, description, created_at) "
-            "VALUES (?, ?, 'refund', 'real', ?, ?, ?)",
+            "(user_id, amount, type, mode, status, reference, description, created_at) "
+            "VALUES (?, ?, 'refund', 'real', 'completed', ?, ?, ?)",
             (
                 withdrawal["user_id"],
                 int(withdrawal["amount"]),
-                f"withdrawal:{withdrawal_id}:refund",
+                reference,
                 f"Pul yechish so'rovi #{withdrawal_id} bekor qilindi",
-                utcnow_iso(),
+                now,
             ),
         )
-        user = await ex.fetchone(
-            "SELECT tg_id, lang FROM users WHERE id = ?", (withdrawal["user_id"],)
+        await _wallet_audit(
+            ex,
+            withdrawal["user_id"],
+            admin_tg,
+            "withdrawal.reject",
+            int(withdrawal["amount"]),
+            before,
+            before + int(withdrawal["amount"]),
+            f"Pul yechish so'rovi #{withdrawal_id} rad etildi",
+            reference,
         )
         return {
             "withdrawal_id": withdrawal_id,

@@ -82,8 +82,11 @@ async def topup_amount(
             await message.answer(str(exc))
             return
         await state.clear()
+        order_id = topup.get("public_id") or topup["id"]
         await message.answer(
-            t(lang, "wallet.click_title", amount=fmt_sum(topup["amount"])),
+            t(lang, "wallet.click_title", amount=fmt_sum(topup["amount"]))
+            + "\n\n"
+            + t(lang, "wallet.order_id", id=order_id),
             reply_markup=click_payment_keyboard(
                 lang, click_service.build_payment_url(topup)
             ),
@@ -108,13 +111,16 @@ async def topup_amount(
             return
         await payment.mark_hamyon_created(int(topup["id"]), created["payment_id"])
         await state.clear()
+        order_id = topup.get("public_id") or topup["id"]
         await message.answer(
             t(
                 lang,
                 "wallet.hamyon_title",
                 amount=fmt_sum(topup["amount"]),
                 card=created["card"],
-            ),
+            )
+            + "\n\n"
+            + t(lang, "wallet.order_id", id=order_id),
             reply_markup=hamyon_payment_keyboard(lang, int(topup["id"])),
         )
         return
@@ -236,7 +242,12 @@ async def topup_receipt(
         return
     await state.clear()
     await message.answer(
-        t(lang, "wallet.topup_created", id=topup["id"], amount=fmt_sum(topup["amount"])),
+        t(
+            lang,
+            "wallet.topup_created",
+            id=topup.get("public_id") or topup["id"],
+            amount=fmt_sum(topup["amount"]),
+        ),
         reply_markup=main_menu_reply(lang, bool(user["is_seller"]), is_admin_user(user)),
     )
     info = dict(topup)
@@ -251,28 +262,33 @@ async def topup_receipt(
 @router.callback_query(F.data == "wallet:history")
 async def history(callback: CallbackQuery, user: dict, lang: str) -> None:
     mode = "test" if user["test_mode"] else "real"
-    rows = await payment.list_transactions(user["id"], mode)
+    rows = await payment.list_transactions(user["id"], mode, limit=20)
     if not rows:
         await callback.answer()
-
         await respond(callback, t(lang, "wallet.no_transactions"), back_keyboard(lang, "menu:wallet"))
         return
     lines = []
     for row in rows:
-        sign = "+" if int(row["amount"]) > 0 else "-"
+        amt = int(row["amount"])
+        sign = "+" if amt > 0 else "-"
         label = t(lang, f"tx.type.{row['type']}")
+        desc = row.get("description") or ""
+        status = t(lang, f"wallet.txstatus.{row.get('status') or 'completed'}")
+        # Qisqa tavsif ko'rsatish (50 belgi)
+        desc_short = f"\n  <i>{desc[:60]}</i>" if desc else ""
+        ref = row.get("reference") or ""
+        ref_short = f"\n  ID: <code>{ref}</code>" if ref else ""
         lines.append(
             t(
                 lang,
                 "wallet.tx_line",
                 label=label,
                 sign=sign,
-                amount=fmt_sum(abs(int(row["amount"]))),
+                amount=fmt_sum(abs(amt)),
                 date=fmt_dt(row["created_at"]),
-            )
+            ) + f"\n  {status}" + desc_short + ref_short
         )
     text = t(lang, "wallet.history") + "\n\n" + "\n".join(lines)
-
     await callback.answer()
     await respond(callback, text, back_keyboard(lang, "menu:wallet"))
 
@@ -297,7 +313,7 @@ async def requests_history(callback: CallbackQuery, user: dict, lang: str) -> No
             t(
                 lang,
                 "wallet.request_line",
-                id=row["id"],
+                id=row.get("public_id") or row["id"],
                 amount=fmt_sum(row["amount"]),
                 status=status_label(row["status"]),
                 date=fmt_dt(row["created_at"]),

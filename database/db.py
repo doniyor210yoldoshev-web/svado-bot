@@ -44,7 +44,8 @@ _SCHEMA: list[str] = [
         test_balance BIGINT NOT NULL DEFAULT 0,
         rating REAL NOT NULL DEFAULT 0,
         rating_count INTEGER NOT NULL DEFAULT 0,
-        created_at TEXT NOT NULL
+        created_at TEXT NOT NULL,
+        updated_at TEXT
     )
     """,
     """
@@ -57,7 +58,7 @@ _SCHEMA: list[str] = [
         photo_id TEXT,
         extra_info TEXT NOT NULL DEFAULT '',
         verification_code TEXT,
-        verification_status TEXT NOT NULL DEFAULT 'verified',
+        verification_status TEXT NOT NULL DEFAULT 'unverified',
         login_enc TEXT NOT NULL,
         login_hash TEXT NOT NULL,
         password_enc TEXT NOT NULL,
@@ -66,9 +67,22 @@ _SCHEMA: list[str] = [
         mode TEXT NOT NULL DEFAULT 'real',
         is_approved INTEGER NOT NULL DEFAULT 1,
         created_at TEXT NOT NULL,
-        sold_at TEXT
+        sold_at TEXT,
+        updated_at TEXT
     )
     """,
+    """
+    CREATE TABLE IF NOT EXISTS wallets (
+        user_id BIGINT PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+        balance BIGINT NOT NULL DEFAULT 0,
+        test_balance BIGINT NOT NULL DEFAULT 0,
+        currency TEXT NOT NULL DEFAULT 'UZS',
+        status TEXT NOT NULL DEFAULT 'active',
+        created_at TEXT NOT NULL,
+        updated_at TEXT
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_wallets_balance ON wallets(balance)",
     "CREATE UNIQUE INDEX IF NOT EXISTS idx_accounts_login_hash ON accounts(login_hash)",
     "CREATE UNIQUE INDEX IF NOT EXISTS idx_accounts_display_id ON accounts(display_id)",
     "CREATE INDEX IF NOT EXISTS idx_accounts_seller_status ON accounts(seller_id, status)",
@@ -86,6 +100,7 @@ _SCHEMA: list[str] = [
         mode TEXT NOT NULL DEFAULT 'real',
         payment_deadline TEXT,
         payment_id TEXT,
+        payment_amount BIGINT,
         cancel_requested_at TEXT,
         seller_response TEXT,
         seller_response_at TEXT,
@@ -95,7 +110,8 @@ _SCHEMA: list[str] = [
         reminder_5_sent INTEGER NOT NULL DEFAULT 0,
         reminder_1_sent INTEGER NOT NULL DEFAULT 0,
         created_at TEXT NOT NULL,
-        completed_at TEXT
+        completed_at TEXT,
+        updated_at TEXT
     )
     """,
     "CREATE INDEX IF NOT EXISTS idx_orders_buyer ON orders(buyer_id)",
@@ -109,12 +125,31 @@ _SCHEMA: list[str] = [
         amount BIGINT NOT NULL,
         type TEXT NOT NULL,
         mode TEXT NOT NULL DEFAULT 'real',
+        status TEXT NOT NULL DEFAULT 'completed',
         reference TEXT UNIQUE,
         description TEXT,
-        created_at TEXT NOT NULL
+        created_at TEXT NOT NULL,
+        updated_at TEXT
     )
     """,
     "CREATE INDEX IF NOT EXISTS idx_transactions_user ON transactions(user_id)",
+    "CREATE INDEX IF NOT EXISTS idx_transactions_status ON transactions(status)",
+    """
+    CREATE TABLE IF NOT EXISTS wallet_audit_logs (
+        id {{ID}},
+        user_id BIGINT REFERENCES users(id) ON DELETE SET NULL,
+        actor_tg BIGINT,
+        action TEXT NOT NULL,
+        amount BIGINT NOT NULL DEFAULT 0,
+        balance_before BIGINT NOT NULL DEFAULT 0,
+        balance_after BIGINT NOT NULL DEFAULT 0,
+        note TEXT,
+        reference TEXT,
+        created_at TEXT NOT NULL
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_wallet_audit_user ON wallet_audit_logs(user_id)",
+    "CREATE INDEX IF NOT EXISTS idx_wallet_audit_created ON wallet_audit_logs(created_at)",
     """
     CREATE TABLE IF NOT EXISTS payments (
         id {{ID}},
@@ -126,7 +161,8 @@ _SCHEMA: list[str] = [
         card TEXT,
         status TEXT NOT NULL DEFAULT 'pending',
         created_at TEXT NOT NULL,
-        completed_at TEXT
+        completed_at TEXT,
+        updated_at TEXT
     )
     """,
     "CREATE INDEX IF NOT EXISTS idx_payments_order ON payments(order_id)",
@@ -150,10 +186,13 @@ _SCHEMA: list[str] = [
         amount BIGINT NOT NULL,
         status TEXT NOT NULL DEFAULT 'completed',
         reason TEXT,
-        created_at TEXT NOT NULL
+        reference TEXT UNIQUE,
+        created_at TEXT NOT NULL,
+        updated_at TEXT
     )
     """,
     "CREATE INDEX IF NOT EXISTS idx_refunds_order ON refunds(order_id)",
+    "CREATE UNIQUE INDEX IF NOT EXISTS idx_refunds_reference ON refunds(reference)",
     """
     CREATE TABLE IF NOT EXISTS disputes (
         id {{ID}},
@@ -168,7 +207,8 @@ _SCHEMA: list[str] = [
         decision_reason TEXT,
         created_at TEXT NOT NULL,
         resolved_by BIGINT,
-        resolved_at TEXT
+        resolved_at TEXT,
+        updated_at TEXT
     )
     """,
     "CREATE INDEX IF NOT EXISTS idx_disputes_status ON disputes(status)",
@@ -209,6 +249,7 @@ _SCHEMA: list[str] = [
     """
     CREATE TABLE IF NOT EXISTS topups (
         id {{ID}},
+        public_id TEXT UNIQUE,
         user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
         amount BIGINT NOT NULL,
         receipt_type TEXT NOT NULL,
@@ -217,7 +258,8 @@ _SCHEMA: list[str] = [
         mode TEXT NOT NULL DEFAULT 'real',
         created_at TEXT NOT NULL,
         reviewed_by BIGINT,
-        reviewed_at TEXT
+        reviewed_at TEXT,
+        updated_at TEXT
     )
     """,
     "CREATE INDEX IF NOT EXISTS idx_topups_status ON topups(status)",
@@ -231,7 +273,8 @@ _SCHEMA: list[str] = [
         mode TEXT NOT NULL DEFAULT 'real',
         created_at TEXT NOT NULL,
         reviewed_by BIGINT,
-        reviewed_at TEXT
+        reviewed_at TEXT,
+        updated_at TEXT
     )
     """,
     "CREATE INDEX IF NOT EXISTS idx_withdrawals_status ON withdrawals(status)",
@@ -266,6 +309,7 @@ _MIGRATIONS: dict[str, dict[str, str]] = {
         "test_balance": "BIGINT NOT NULL DEFAULT 0",
         "rating": "REAL NOT NULL DEFAULT 0",
         "rating_count": "INTEGER NOT NULL DEFAULT 0",
+        "updated_at": "TEXT",
     },
     "accounts": {
         "display_id": "INTEGER",
@@ -274,19 +318,22 @@ _MIGRATIONS: dict[str, dict[str, str]] = {
         "photo_id": "TEXT",
         "extra_info": "TEXT NOT NULL DEFAULT ''",
         "verification_code": "TEXT",
-        "verification_status": "TEXT NOT NULL DEFAULT 'verified'",
+        "verification_status": "TEXT NOT NULL DEFAULT 'unverified'",
         "mode": "TEXT NOT NULL DEFAULT 'real'",
         "is_approved": "INTEGER NOT NULL DEFAULT 1",
+        "updated_at": "TEXT",
     },
     "orders": {
         "mode": "TEXT NOT NULL DEFAULT 'real'",
         "payment_deadline": "TEXT",
         "payment_id": "TEXT",
+        "payment_amount": "BIGINT",
         "cancel_requested_at": "TEXT",
         "seller_response": "TEXT",
         "seller_response_at": "TEXT",
         "reminder_5_sent": "INTEGER NOT NULL DEFAULT 0",
         "reminder_1_sent": "INTEGER NOT NULL DEFAULT 0",
+        "updated_at": "TEXT",
     },
     "disputes": {
         "seller_response": "TEXT",
@@ -294,13 +341,22 @@ _MIGRATIONS: dict[str, dict[str, str]] = {
         "auto_resolved": "INTEGER NOT NULL DEFAULT 0",
         "decision": "TEXT",
         "decision_reason": "TEXT",
+        "updated_at": "TEXT",
     },
     "transactions": {
         "mode": "TEXT NOT NULL DEFAULT 'real'",
+        "status": "TEXT NOT NULL DEFAULT 'completed'",
         "reference": "TEXT",
+        "updated_at": "TEXT",
     },
-    "topups": {"mode": "TEXT NOT NULL DEFAULT 'real'"},
-    "withdrawals": {"mode": "TEXT NOT NULL DEFAULT 'real'"},
+    "payments": {"updated_at": "TEXT"},
+    "refunds": {"reference": "TEXT", "updated_at": "TEXT"},
+    "topups": {
+        "public_id": "TEXT",
+        "mode": "TEXT NOT NULL DEFAULT 'real'",
+        "updated_at": "TEXT",
+    },
+    "withdrawals": {"mode": "TEXT NOT NULL DEFAULT 'real'", "updated_at": "TEXT"},
 }
 
 
@@ -426,6 +482,86 @@ class Database:
             "CREATE UNIQUE INDEX IF NOT EXISTS idx_transactions_reference "
             "ON transactions(reference)"
         )
+        await self._run_ddl(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_topups_public_id "
+            "ON topups(public_id)"
+        )
+        await self._sync_wallets()
+
+    async def _sync_wallets(self) -> None:
+        """Backfill and keep the ``wallets`` table in sync with ``users`` balances.
+
+        ``users.balance`` stays the source of truth so all existing code keeps
+        working. Database triggers mirror changes into ``wallets`` atomically,
+        which means admin screens can query a real wallet table without the two
+        values ever diverging.
+        """
+        await self._run_ddl(
+            "INSERT INTO wallets "
+            "(user_id, balance, test_balance, currency, status, created_at, updated_at) "
+            "SELECT u.id, u.balance, u.test_balance, 'UZS', 'active', "
+            "u.created_at, u.updated_at FROM users u "
+            "WHERE NOT EXISTS (SELECT 1 FROM wallets w WHERE w.user_id = u.id)"
+        )
+        if self.is_postgres:
+            await self._run_ddl(
+                """
+                CREATE OR REPLACE FUNCTION sync_wallets_from_users()
+                RETURNS trigger AS $$
+                BEGIN
+                    INSERT INTO wallets
+                        (user_id, balance, test_balance, currency, status,
+                         created_at, updated_at)
+                    VALUES
+                        (NEW.id, NEW.balance, NEW.test_balance, 'UZS', 'active',
+                         NEW.created_at, NEW.updated_at)
+                    ON CONFLICT (user_id) DO UPDATE SET
+                        balance = EXCLUDED.balance,
+                        test_balance = EXCLUDED.test_balance,
+                        updated_at = EXCLUDED.updated_at;
+                    RETURN NEW;
+                END;
+                $$ LANGUAGE plpgsql
+                """
+            )
+            await self._run_ddl("DROP TRIGGER IF EXISTS trg_users_wallet ON users")
+            await self._run_ddl(
+                "CREATE TRIGGER trg_users_wallet "
+                "AFTER INSERT OR UPDATE ON users "
+                "FOR EACH ROW EXECUTE FUNCTION sync_wallets_from_users()"
+            )
+        else:
+            await self._run_ddl(
+                """
+                CREATE TRIGGER IF NOT EXISTS trg_users_wallet_insert
+                AFTER INSERT ON users
+                BEGIN
+                    INSERT INTO wallets
+                        (user_id, balance, test_balance, currency, status,
+                         created_at, updated_at)
+                    VALUES
+                        (NEW.id, NEW.balance, NEW.test_balance, 'UZS', 'active',
+                         NEW.created_at, NEW.updated_at)
+                    ON CONFLICT(user_id) DO UPDATE SET
+                        balance = excluded.balance,
+                        test_balance = excluded.test_balance,
+                        updated_at = excluded.updated_at;
+                END
+                """
+            )
+            await self._run_ddl(
+                """
+                CREATE TRIGGER IF NOT EXISTS trg_users_wallet_update
+                AFTER UPDATE OF balance, test_balance ON users
+                BEGIN
+                    UPDATE wallets
+                    SET balance = NEW.balance,
+                        test_balance = NEW.test_balance,
+                        updated_at = NEW.updated_at
+                    WHERE user_id = NEW.id;
+                END
+                """
+            )
 
     async def _run_ddl(self, statement: str) -> None:
         if self.is_postgres:

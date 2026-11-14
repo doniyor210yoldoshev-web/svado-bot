@@ -71,7 +71,7 @@ HAMYON_SHOP_ID = os.getenv("HAMYON_SHOP_ID", "").strip()
 HAMYON_SHOP_KEY = os.getenv("HAMYON_SHOP_KEY", "").strip()
 
 # --- Business rules -------------------------------------------------------
-COMMISSION_PERCENT = int(os.getenv("COMMISSION_PERCENT", "8"))
+COMMISSION_PERCENT = int(os.getenv("COMMISSION_PERCENT", "7"))
 CHECK_MINUTES = int(os.getenv("CHECK_MINUTES", "10"))
 PENALTY_PERCENT = int(os.getenv("PENALTY_PERCENT", "10"))
 PENALTY_INTERVAL_MINUTES = int(os.getenv("PENALTY_INTERVAL_MINUTES", "10"))
@@ -89,6 +89,13 @@ TEST_MAX_ACCOUNTS = int(os.getenv("TEST_MAX_ACCOUNTS", "10"))
 
 SELLER_SHARE_PERCENT = 100 - COMMISSION_PERCENT
 
+SEED_TEST_ACCOUNTS = os.getenv("SEED_TEST_ACCOUNTS", "1").strip().lower() not in (
+    "0",
+    "false",
+    "no",
+    "",
+)
+
 if not 0 <= COMMISSION_PERCENT < 100:
     raise ValueError("COMMISSION_PERCENT 0 va 99 oralig'ida bo'lishi kerak")
 if CHECK_MINUTES <= 0 or PENALTY_INTERVAL_MINUTES <= 0 or AUTO_COMPLETE_MINUTES < 0:
@@ -97,3 +104,5 @@ if not 0 <= PENALTY_PERCENT <= 100:
     raise ValueError("PENALTY_PERCENT noto'g'ri")
 if PAGE_SIZE <= 0 or PAGE_SIZE > 50:
     raise ValueError("PAGE_SIZE 1 va 50 oralig'ida bo'lishi kerak")
+if MIN_TOPUP <= 0 or MAX_TOPUP < MIN_TOPUP:
+    raise ValueError("MIN_TOPUP musbat va MAX_TOPUP dan kichik bo'lishi kerak")

@@ -8,9 +8,10 @@ from aiogram import Bot
 from aiogram.exceptions import TelegramAPIError
 
 from config import SELLER_SHARE_PERCENT
+from keyboards.inline import seller_dispute_keyboard
 from services import users as users_service
 from services.i18n import t
-from utils import fmt_dt, fmt_sum
+from utils import esc, fmt_dt, fmt_sum
 
 logger = logging.getLogger(__name__)
 
@@ -82,18 +83,38 @@ async def sale_completed(bot: Bot, info: dict) -> None:
 
 async def dispute_opened(bot: Bot, dispute: dict) -> None:
     if dispute.get("seller_tg"):
+        seller_lang = dispute.get("seller_lang") or "uz"
         await notify(
             bot,
             dispute["seller_tg"],
-            dispute.get("seller_lang"),
+            seller_lang,
             "notify.dispute_seller",
+            reply_markup=seller_dispute_keyboard(seller_lang, dispute["order_id"]),
             order=dispute["order_id"],
-            account=dispute["account_id"],
-            reason=dispute["reason"],
+            account=dispute.get("account_display_id") or dispute["account_id"],
+            reason=esc(dispute["reason"]),
         )
 
 
 async def dispute_resolved(bot: Bot, info: dict) -> None:
+    if info["action"] == "hold":
+        if info.get("buyer_tg"):
+            await notify(
+                bot,
+                info["buyer_tg"],
+                info.get("buyer_lang"),
+                "notify.dispute_hold_buyer",
+                order=info["order_id"],
+            )
+        if info.get("seller_tg"):
+            await notify(
+                bot,
+                info["seller_tg"],
+                info.get("seller_lang"),
+                "notify.dispute_hold_seller",
+                order=info["order_id"],
+            )
+        return
     if info["action"] == "refund":
         if info.get("buyer_tg"):
             await notify(
@@ -208,6 +229,7 @@ async def notify_admin_event(bot: Bot, event_type: str, **kwargs) -> None:
         "trade_completed": "✅ <b>[ADMIN] Savdo muvaffaqiyatli yakunlandi:</b> #{order_id} (Sotuvchiga: {share}, Komissiya: {commission})",
         "fraud_alert": "⚠️ <b>[ADMIN OGOHLANTIRISH] Firibgarlik / Nizo:</b> #{order_id}\nSabab: {reason}\nQaror: {decision}",
         "order_cancelled": "ℹ️ <b>[ADMIN] Buyurtma bekor qilindi (5 daqiqa vaqt tugadi):</b> #{order_id}",
+        "late_payment_credited": "⚠️ <b>[ADMIN] Kechikkan to'lov:</b> Buyurtma #{order_id} bekor qilingan, {amount} xaridor hamyoniga qaytarildi.",
     }
     template = messages.get(event_type)
     if not template:
