@@ -28,7 +28,7 @@ from services import notifications, payment
 from services.errors import ServiceError
 from services.i18n import t
 from states import TopupFlow
-from utils import fmt_dt, fmt_sum, parse_amount
+from utils import esc, fmt_dt, fmt_sum, parse_amount
 
 router = Router(name="wallet")
 
@@ -102,7 +102,7 @@ async def topup_amount(
         try:
             topup = await payment.create_hamyon_topup(user["id"], amount)
             created = await hamyon_service.create_payment(
-                int(topup["id"]), int(topup["amount"])
+                f"t{int(topup['id'])}", int(topup["amount"])
             )
         except ServiceError as exc:
             if topup is not None:
@@ -117,7 +117,7 @@ async def topup_amount(
                 lang,
                 "wallet.hamyon_title",
                 amount=fmt_sum(topup["amount"]),
-                card=created["card"],
+                card=esc(created["card"]),
             )
             + "\n\n"
             + t(lang, "wallet.order_id", id=order_id),
@@ -140,18 +140,19 @@ async def topup_amount(
 
 
 async def _hamyon_topup_or_answer(
-    callback: CallbackQuery, topup_id: int, lang: str
+    callback: CallbackQuery, topup_id: int, lang: str, user: dict
 ) -> dict | None:
     topup = await payment.get_hamyon_topup(payment_id="", order_id=topup_id)
-    if topup is None:
+    if topup is None or int(topup["user_id"]) != int(user["id"]):
         await callback.answer(t(lang, "wallet.hamyon_not_found"), show_alert=True)
+        return None
     return topup
 
 
 @router.callback_query(F.data.startswith("hamyon:check:"))
 async def hamyon_check(callback: CallbackQuery, user: dict, lang: str) -> None:
     topup_id = int(str(callback.data).split(":", 2)[2])
-    topup = await _hamyon_topup_or_answer(callback, topup_id, lang)
+    topup = await _hamyon_topup_or_answer(callback, topup_id, lang, user)
     if topup is None:
         return
     payment_id = str(topup.get("receipt_value") or "").strip()
@@ -194,7 +195,7 @@ async def hamyon_check(callback: CallbackQuery, user: dict, lang: str) -> None:
 @router.callback_query(F.data.startswith("hamyon:cancel:"))
 async def hamyon_cancel(callback: CallbackQuery, user: dict, lang: str) -> None:
     topup_id = int(str(callback.data).split(":", 2)[2])
-    topup = await _hamyon_topup_or_answer(callback, topup_id, lang)
+    topup = await _hamyon_topup_or_answer(callback, topup_id, lang, user)
     if topup is None:
         return
     if topup["status"] == "approved":
@@ -275,9 +276,9 @@ async def history(callback: CallbackQuery, user: dict, lang: str) -> None:
         desc = row.get("description") or ""
         status = t(lang, f"wallet.txstatus.{row.get('status') or 'completed'}")
         # Qisqa tavsif ko'rsatish (50 belgi)
-        desc_short = f"\n  <i>{desc[:60]}</i>" if desc else ""
+        desc_short = f"\n  <i>{esc(desc[:60])}</i>" if desc else ""
         ref = row.get("reference") or ""
-        ref_short = f"\n  ID: <code>{ref}</code>" if ref else ""
+        ref_short = f"\n  ID: <code>{esc(ref)}</code>" if ref else ""
         lines.append(
             t(
                 lang,

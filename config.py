@@ -18,6 +18,12 @@ DATABASE_URL = os.getenv("DATABASE_URL", "").strip()
 DB_PATH = Path(os.getenv("DB_PATH") or str(DATA_DIR / "market.db"))
 FSM_DB_PATH = Path(os.getenv("FSM_DB_PATH") or str(DATA_DIR / "fsm.db"))
 
+# Render sets RENDER=true. A PostgreSQL URL is also treated as production
+# because it means the bot is running against the shared, persistent database.
+IS_PRODUCTION = bool(os.getenv("RENDER")) or DATABASE_URL.startswith(
+    ("postgres://", "postgresql://")
+)
+
 # --- Secrets --------------------------------------------------------------
 FERNET_KEY_PATH = Path(
     os.getenv("FERNET_KEY_PATH") or str(DATA_DIR / "fernet.key")
@@ -72,9 +78,13 @@ HAMYON_SHOP_KEY = os.getenv("HAMYON_SHOP_KEY", "").strip()
 
 # --- Business rules -------------------------------------------------------
 COMMISSION_PERCENT = int(os.getenv("COMMISSION_PERCENT", "7"))
-CHECK_MINUTES = int(os.getenv("CHECK_MINUTES", "10"))
-PENALTY_PERCENT = int(os.getenv("PENALTY_PERCENT", "10"))
-PENALTY_INTERVAL_MINUTES = int(os.getenv("PENALTY_INTERVAL_MINUTES", "10"))
+# Tekshirish oynasi: to'lov tasdiqlangach xaridor parolni oladi va 5 daqiqa
+# ichida akkauntni tekshirib tasdiqlashi yoki shikoyat qilishi kerak.
+CHECK_MINUTES = int(os.getenv("CHECK_MINUTES", "5"))
+# Tekshirish muddati tugagach har daqiqada narxning 7% i jarima sifatida
+# xaridor balansidan yechiladi va har daqiqada ogohlantirish yuboriladi.
+PENALTY_PERCENT = int(os.getenv("PENALTY_PERCENT", "7"))
+PENALTY_INTERVAL_MINUTES = int(os.getenv("PENALTY_INTERVAL_MINUTES", "1"))
 AUTO_COMPLETE_MINUTES = int(os.getenv("AUTO_COMPLETE_MINUTES", "60"))
 MIN_PRICE = int(os.getenv("MIN_PRICE", "1000"))
 MIN_TOPUP = int(os.getenv("MIN_TOPUP", "1000"))
@@ -106,3 +116,40 @@ if PAGE_SIZE <= 0 or PAGE_SIZE > 50:
     raise ValueError("PAGE_SIZE 1 va 50 oralig'ida bo'lishi kerak")
 if MIN_TOPUP <= 0 or MAX_TOPUP < MIN_TOPUP:
     raise ValueError("MIN_TOPUP musbat va MAX_TOPUP dan kichik bo'lishi kerak")
+if MIN_PRICE <= 0 or MIN_WITHDRAW <= 0:
+    raise ValueError("MIN_PRICE va MIN_WITHDRAW musbat bo'lishi kerak")
+
+# --- Payment provider validation -----------------------------------------
+if PAYMENT_PROVIDER not in ("manual", "click", "hamyon"):
+    raise ValueError(
+        "PAYMENT_PROVIDER faqat manual, click yoki hamyon bo'lishi mumkin"
+    )
+if PAYMENT_PROVIDER == "click":
+    _missing_click = [
+        name
+        for name, value in (
+            ("CLICK_SERVICE_ID", CLICK_SERVICE_ID),
+            ("CLICK_MERCHANT_ID", CLICK_MERCHANT_ID),
+            ("CLICK_SECRET_KEY", CLICK_SECRET_KEY),
+        )
+        if not value
+    ]
+    if _missing_click:
+        raise ValueError("Click sozlamalari to'liq emas: " + ", ".join(_missing_click))
+if PAYMENT_PROVIDER == "hamyon":
+    _missing_hamyon = [
+        name
+        for name, value in (
+            ("HAMYON_SHOP_ID", HAMYON_SHOP_ID),
+            ("HAMYON_SHOP_KEY", HAMYON_SHOP_KEY),
+        )
+        if not value
+    ]
+    if _missing_hamyon:
+        raise ValueError(
+            "HamyonAPI sozlamalari to'liq emas: " + ", ".join(_missing_hamyon)
+        )
+if IS_PRODUCTION and PAYMENT_PROVIDER != "manual" and not PUBLIC_BASE_URL:
+    raise ValueError(
+        "PUBLIC_BASE_URL majburiy: to'lov provayderi callback manzilini bilishi kerak"
+    )

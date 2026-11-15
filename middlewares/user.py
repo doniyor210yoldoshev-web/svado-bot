@@ -14,7 +14,6 @@ from keyboards.reply import phone_reply
 from services import notifications
 from services.i18n import t
 from services.users import ensure_user, get_user_by_tg, user_lang
-from utils import esc
 
 _ONBOARDING_CALLBACKS = ("lang:", "terms:")
 _ONBOARDING_COMMANDS = ("/start", "/help", "/cancel")
@@ -56,9 +55,9 @@ class UserMiddleware(BaseMiddleware):
                 await notifications.notify_admin_event(
                     bot,
                     "new_user",
-                    name=esc(tg_user.full_name) or "—",
+                    name=tg_user.full_name or "—",
                     tg_id=tg_user.id,
-                    phone=esc(db_user.get("phone") or "—"),
+                    phone=db_user.get("phone") or "—",
                 )
 
         if db_user["is_blocked"] and not db_user["is_admin"]:

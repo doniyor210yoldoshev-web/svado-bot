@@ -23,6 +23,7 @@ from database.fsm import SQLiteStorage
 from handlers import routers
 from health import start_health_server
 from middlewares import ThrottlingMiddleware, UserMiddleware
+from services import security
 from services.i18n import reload_locales
 from services.scheduler import start_scheduler, stop_scheduler
 
@@ -39,12 +40,17 @@ async def on_error(event: ErrorEvent) -> bool:
     return True
 
 
-async def main() -> None:
+async def main() -> int:
     if not BOT_TOKEN:
-        logger.error(
+        logger.critical(
             "BOT_TOKEN topilmadi. .env fayliga BotFather'dan olingan tokenni yozing."
         )
-        return
+        return 1
+    try:
+        security.validate_fernet_config()
+    except RuntimeError as exc:
+        logger.critical("Xavfsizlik sozlamasi xato: %s", exc)
+        return 1
     if not ADMIN_IDS:
         logger.warning(
             "ADMIN_IDS bo'sh. Admin panel va to'lovlarni tasdiqlash ishlamaydi."
@@ -106,10 +112,12 @@ async def main() -> None:
         await db.close()
         await bot.session.close()
         logger.info("Bot to'xtatildi")
+    return 0
 
 
 if __name__ == "__main__":
     try:
-        asyncio.run(main())
-    except (KeyboardInterrupt, SystemExit):
-        pass
+        exit_code = asyncio.run(main())
+    except KeyboardInterrupt:
+        exit_code = 130
+    raise SystemExit(exit_code)

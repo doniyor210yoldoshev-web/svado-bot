@@ -15,19 +15,17 @@ logger = logging.getLogger(__name__)
 
 async def ensure_user(tg_id: int, full_name: str, username: str | None) -> dict:
     is_admin = 1 if int(tg_id) in ADMIN_IDS else 0
-    row = await db.fetchone("SELECT * FROM users WHERE tg_id = ?", (tg_id,))
-    if row is None:
-        await db.insert(
-            "INSERT INTO users (tg_id, full_name, username, is_admin, created_at) "
-            "VALUES (?, ?, ?, ?, ?)",
-            (tg_id, full_name or "", username, is_admin, utcnow_iso()),
-        )
-    else:
-        await db.execute(
-            "UPDATE users SET full_name = ?, username = ?, is_admin = ?, updated_at = ? "
-            "WHERE id = ?",
-            (full_name or "", username, is_admin, utcnow_iso(), row["id"]),
-        )
+    now = utcnow_iso()
+    # A single upsert removes the first-registration race where two updates
+    # from the same Telegram user could both try to INSERT the same tg_id.
+    await db.execute(
+        "INSERT INTO users (tg_id, full_name, username, is_admin, created_at, updated_at) "
+        "VALUES (?, ?, ?, ?, ?, ?) "
+        "ON CONFLICT(tg_id) DO UPDATE SET "
+        "full_name = excluded.full_name, username = excluded.username, "
+        "is_admin = excluded.is_admin, updated_at = excluded.updated_at",
+        (tg_id, full_name or "", username, is_admin, now, now),
+    )
     return await db.fetchone("SELECT * FROM users WHERE tg_id = ?", (tg_id,))
 
 
@@ -144,12 +142,17 @@ async def seller_rating(seller_id: int) -> str:
 
 async def search_user(query: str) -> dict | None:
     query = query.strip().lstrip("@")
-    if not query:
+    if not query or len(query) > 64:
         return None
     if query.isdigit():
+        if len(query) > 18:
+            return None
+        value = int(query)
+        if value > 2**63 - 1:
+            return None
         return await db.fetchone(
             "SELECT * FROM users WHERE tg_id = ? OR id = ? OR seller_code = ?",
-            (int(query), int(query), query),
+            (value, value, query),
         )
     return await db.fetchone(
         "SELECT * FROM users WHERE username = ? OR seller_code = ?",

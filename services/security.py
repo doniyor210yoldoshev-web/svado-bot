@@ -10,7 +10,7 @@ import secrets
 
 from cryptography.fernet import Fernet, InvalidToken
 
-from config import ADMIN_IDS, FERNET_KEY, FERNET_KEY_PATH
+from config import ADMIN_IDS, FERNET_KEY, FERNET_KEY_PATH, IS_PRODUCTION
 from utils import clean_card, esc, parse_amount
 
 logger = logging.getLogger(__name__)
@@ -30,6 +30,13 @@ def _load_fernet() -> Fernet:
         return _fernet
     if FERNET_KEY:
         key = FERNET_KEY.encode("ascii")
+    elif IS_PRODUCTION:
+        # Render's filesystem is ephemeral. Generating a key at boot would make
+        # every saved account credential undecryptable after the next deploy.
+        raise RuntimeError(
+            "FERNET_KEY majburiy: productionda persistens kalitni environment "
+            "orqali bering. Kalitni yo'qotish saqlangan login-parollarni buzadi."
+        )
     elif FERNET_KEY_PATH.exists():
         key = FERNET_KEY_PATH.read_bytes().strip()
     else:
@@ -39,8 +46,18 @@ def _load_fernet() -> Fernet:
             FERNET_KEY_PATH.chmod(0o600)
         except OSError:
             pass
-    _fernet = Fernet(key)
+    try:
+        _fernet = Fernet(key)
+    except (TypeError, ValueError) as exc:
+        raise RuntimeError(
+            "FERNET_KEY noto'g'ri. Fernet.generate_key() natijasidagi kalitni kiriting."
+        ) from exc
     return _fernet
+
+
+def validate_fernet_config() -> None:
+    """Fail at startup instead of later when the first credential is saved."""
+    _load_fernet()
 
 
 def encrypt(value: str) -> str:

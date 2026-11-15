@@ -12,7 +12,6 @@ class SellerFlow(StatesGroup):
     title = State()
     description = State()
     price = State()
-    photo = State()
     extra_info = State()
     login = State()
     password = State()
@@ -26,7 +25,6 @@ class PriceEdit(StatesGroup):
 
 class DisputeFlow(StatesGroup):
     reason = State()
-    evidence = State()
 
 
 class TopupFlow(StatesGroup):

@@ -60,7 +60,7 @@ async def sale_pending(bot: Bot, order: dict, account: dict, seller: dict) -> No
         seller["tg_id"],
         seller["lang"],
         "notify.seller_sold",
-        title=account["title"],
+        title=esc(account["title"]),
         price=fmt_sum(order["price"]),
         order=order["id"],
         share=SELLER_SHARE_PERCENT,
@@ -157,11 +157,11 @@ async def topup_created_admins(bot: Bot, topup: dict) -> None:
     await notify_admins(
         bot,
         "admin.topup_card",
-        name=topup.get("user_name") or "—",
+        name=esc(topup.get("user_name") or "—"),
         tg=topup.get("user_tg"),
-        username=topup.get("username") or "—",
+        username=esc(topup.get("username") or "—"),
         amount=fmt_sum(topup["amount"]),
-        receipt_type=topup.get("receipt_type") or "—",
+        receipt_type=esc(topup.get("receipt_type") or "—"),
         date=fmt_dt(topup.get("created_at")),
         id=topup["id"],
     )
@@ -184,11 +184,11 @@ async def withdrawal_created_admins(bot: Bot, withdrawal: dict) -> None:
     await notify_admins(
         bot,
         "admin.withdrawal_card",
-        name=withdrawal.get("user_name") or "—",
+        name=esc(withdrawal.get("user_name") or "—"),
         tg=withdrawal.get("user_tg"),
-        code=withdrawal.get("seller_code") or "—",
+        code=esc(withdrawal.get("seller_code") or "—"),
         amount=fmt_sum(withdrawal["amount"]),
-        card=withdrawal["card_number"],
+        card=esc(withdrawal["card_number"]),
         date=fmt_dt(withdrawal.get("created_at")),
         id=withdrawal["id"],
     )
@@ -234,6 +234,9 @@ async def notify_admin_event(bot: Bot, event_type: str, **kwargs) -> None:
     template = messages.get(event_type)
     if not template:
         return
-    text = template.format(**kwargs)
+    # Every template renders user/admin-controlled values into HTML. Escape
+    # centrally so a future call site cannot accidentally inject markup.
+    safe_kwargs = {key: esc(value) for key, value in kwargs.items()}
+    text = template.format(**safe_kwargs)
     for admin_tg, _ in await users_service.admin_langs():
         await send(bot, admin_tg, text)

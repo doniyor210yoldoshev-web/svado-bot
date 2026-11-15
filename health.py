@@ -27,14 +27,25 @@ from services import hamyon as hamyon_service
 logger = logging.getLogger(__name__)
 
 _MAX_REQUEST_BYTES = 131_072
+_MAX_CONNECTIONS = 100
+_REQUEST_TIMEOUT_SECONDS = 20
+_DB_HEALTH_TIMEOUT_SECONDS = 3
+_active_connections = 0
 
 
 def _response(status: str, content_type: str, body: bytes) -> bytes:
+    # This server only serves a health endpoint and payment callbacks. It never
+    # needs to be framed, cached or MIME-sniffed, so send conservative headers.
     headers = (
         f"HTTP/1.1 {status}\r\n"
         f"Content-Type: {content_type}; charset=utf-8\r\n"
         f"Content-Length: {len(body)}\r\n"
-        "Connection: close\r\n\r\n"
+        "Connection: close\r\n"
+        "X-Content-Type-Options: nosniff\r\n"
+        "X-Frame-Options: DENY\r\n"
+        "Referrer-Policy: no-referrer\r\n"
+        "Cache-Control: no-store\r\n"
+        "Permissions-Policy: camera=(), microphone=(), geolocation=()\r\n\r\n"
     )
     return headers.encode("latin-1") + body
 
@@ -63,7 +74,7 @@ async def _read_request(
         length = int(headers.get("content-length", "0") or "0")
     except ValueError:
         length = 0
-    length = min(length, _MAX_REQUEST_BYTES)
+    length = max(0, min(length, _MAX_REQUEST_BYTES))
     while len(body) < length:
         chunk = await reader.read(length - len(body))
         if not chunk:
@@ -105,8 +116,28 @@ async def start_health_server(bot: Bot | None = None) -> asyncio.AbstractServer 
     started_at = time.monotonic()
 
     async def handle(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        global _active_connections
+        if _active_connections >= _MAX_CONNECTIONS:
+            try:
+                writer.write(
+                    _response(
+                        "503 Service Unavailable",
+                        "text/plain",
+                        b"Too Many Connections",
+                    )
+                )
+                await writer.drain()
+            except Exception as exc:  # noqa: BLE001 - client may have vanished
+                logger.debug("Health javobini yozishda xatolik: %s", exc)
+            finally:
+                writer.close()
+                await writer.wait_closed()
+            return
+        _active_connections += 1
         try:
-            request_line, headers, body = await _read_request(reader)
+            request_line, headers, body = await asyncio.wait_for(
+                _read_request(reader), timeout=_REQUEST_TIMEOUT_SECONDS
+            )
             parts = request_line.split()
             method = parts[0].upper() if parts else "GET"
             path = parts[1].split("?", 1)[0] if len(parts) >= 2 else "/"
@@ -157,7 +188,10 @@ async def start_health_server(bot: Bot | None = None) -> asyncio.AbstractServer 
             elif path in ("/health", "/healthz", "/ping"):
                 db_ok = True
                 try:
-                    await db.fetchone("SELECT 1 AS ok")
+                    await asyncio.wait_for(
+                        db.fetchone("SELECT 1 AS ok"),
+                        timeout=_DB_HEALTH_TIMEOUT_SECONDS,
+                    )
                 except Exception as exc:  # noqa: BLE001 - any DB error means degraded
                     logger.warning("Health DB tekshiruvi muvaffaqiyatsiz: %s", exc)
                     db_ok = False
@@ -180,13 +214,18 @@ async def start_health_server(bot: Bot | None = None) -> asyncio.AbstractServer 
                 response = _response("404 Not Found", "text/plain", b"Not Found")
 
             writer.write(response)
-            await writer.drain()
+            await asyncio.wait_for(
+                writer.drain(), timeout=_REQUEST_TIMEOUT_SECONDS
+            )
+        except TimeoutError:
+            logger.warning("Health ulanishi vaqt tugashi bilan yopildi")
         except Exception as exc:  # noqa: BLE001 - never crash the health server
             logger.debug("Health so'rovida xatolik: %s", exc)
         finally:
+            _active_connections = max(0, _active_connections - 1)
             try:
                 writer.close()
-                await writer.wait_closed()
+                await asyncio.wait_for(writer.wait_closed(), timeout=5)
             except Exception as exc:  # noqa: BLE001
                 logger.debug("Health ulanishini yopishda xatolik: %s", exc)
 

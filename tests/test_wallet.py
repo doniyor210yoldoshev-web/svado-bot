@@ -8,6 +8,7 @@ import hashlib
 import pytest
 
 from config import MIN_TOPUP
+from database.db import db
 from services import click, hamyon, marketplace, payment, users
 from services.errors import InsufficientFunds, ServiceError
 
@@ -27,6 +28,11 @@ async def _seller_and_account(price: int = 10000, mode: str = "real") -> tuple[d
         password="secret123",
         price=price,
         mode=mode,
+    )
+    await db.execute(
+        "UPDATE accounts SET is_approved = 1, verification_status = 'verified' "
+        "WHERE id = ?",
+        (account_id,),
     )
     return seller, account_id
 
@@ -290,3 +296,46 @@ async def test_withdrawal_rejection_refunds_exactly_once(database) -> None:
 
     rows = await payment.list_transactions(user["id"])
     assert [row["type"] for row in rows].count("refund") == 1
+
+
+async def test_hamyon_topup_lookup_requires_exact_payment_id(database) -> None:
+    user = await _buyer(5010, "Hamyon")
+    topup = await payment.create_hamyon_topup(user["id"], 8000)
+    await payment.mark_hamyon_created(topup["id"], "hp-exact")
+
+    assert (
+        await payment.get_hamyon_topup(
+            payment_id="hp-exact", order_id=f"t{topup['id']}"
+        )
+    )["id"] == topup["id"]
+    assert (
+        await payment.get_hamyon_topup(
+            payment_id="hp-wrong", order_id=f"t{topup['id']}"
+        )
+        is None
+    )
+
+
+async def test_withdrawal_rejection_restores_only_seller_held(database) -> None:
+    user = await _buyer(5011, "Seller held")
+    user = await users.register_seller(user["id"], "+998905550011")
+    await _credit(user["id"], 10000)
+    await db.execute(
+        "INSERT INTO seller_balances (seller_id, available_balance, updated_at) "
+        "VALUES (?, 1000, ?) ON CONFLICT(seller_id) DO UPDATE SET "
+        "available_balance = 1000",
+        (user["id"], "2026-01-01T00:00:00"),
+    )
+
+    withdrawal = await payment.create_withdrawal(
+        user["id"], 5000, "8600 1234 5678 9012"
+    )
+    assert int(withdrawal["seller_held"]) == 1000
+
+    await payment.reject_withdrawal(withdrawal["id"], 111)
+    fresh = await users.get_user(user["id"])
+    seller_row = await db.fetchone(
+        "SELECT available_balance FROM seller_balances WHERE seller_id = ?", (user["id"],)
+    )
+    assert int(fresh["balance"]) == 10000
+    assert int(seller_row["available_balance"]) == 1000

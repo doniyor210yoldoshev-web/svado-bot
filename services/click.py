@@ -105,10 +105,14 @@ def verify_signature(data: dict[str, str]) -> bool:
 
 
 def _as_int(value: object) -> int | None:
-    try:
-        return int(str(value).strip())
-    except (TypeError, ValueError):
+    raw = str(value).strip()
+    digits = raw.removeprefix("-")
+    if not digits.isdigit():
         return None
+    parsed = int(raw)
+    if abs(parsed) > 2**63 - 1:
+        return None
+    return parsed
 
 
 def _amount_matches(raw: object, amount: int) -> bool:
@@ -177,7 +181,9 @@ async def _prepare(data: dict[str, str]) -> dict:
     if topup["status"] != "pending":
         return _error(-9, data)
 
-    click_trans_id = str(data.get("click_trans_id", ""))
+    click_trans_id = str(data.get("click_trans_id", "")).strip()
+    if not click_trans_id:
+        return _error(-8, data)
     await payment.mark_click_prepared(topup_id, click_trans_id)
     logger.info("Click prepare: topup=%s click_trans_id=%s", topup_id, click_trans_id)
     return _success(data, prepare_id=topup_id)
@@ -194,13 +200,22 @@ async def _complete(data: dict[str, str]) -> dict:
     if not verify_signature(data):
         return _error(-1, data)
 
-    topup_id = _as_int(data.get("merchant_prepare_id")) or _as_int(
-        data.get("merchant_trans_id")
-    )
-    if topup_id is None:
+    prepare_id = _as_int(data.get("merchant_prepare_id"))
+    trans_id = _as_int(data.get("merchant_trans_id"))
+    click_trans_id = str(data.get("click_trans_id", "")).strip()
+    if (
+        prepare_id is None
+        or trans_id is None
+        or prepare_id != trans_id
+        or not click_trans_id
+    ):
         return _error(-6, data)
+    topup_id = prepare_id
     topup = await payment.get_click_topup(topup_id)
     if topup is None:
+        return _error(-6, data)
+    if not str(topup.get("receipt_value") or "").strip():
+        # Click must call prepare first; complete without prepare is invalid.
         return _error(-6, data)
     if not _amount_matches(data.get("amount"), int(topup["amount"])):
         return _error(-2, data)
@@ -217,7 +232,7 @@ async def _complete(data: dict[str, str]) -> dict:
 
     info = await payment.complete_click_topup(
         topup_id,
-        str(data.get("click_trans_id", "")),
+        click_trans_id,
         str(data.get("click_paydoc_id", "")),
     )
     if info is None:

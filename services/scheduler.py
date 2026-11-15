@@ -8,6 +8,7 @@ import logging
 from aiogram import Bot
 
 from services import marketplace, notifications
+from utils import esc
 
 logger = logging.getLogger(__name__)
 
@@ -36,7 +37,7 @@ async def _loop(bot: Bot) -> None:
                         item["seller"].get("lang"),
                         "shop.seller_order_cancelled_timeout",
                         order=item["order"]["id"],
-                        title=item["account"]["title"],
+                        title=esc(item["account"]["title"]),
                     )
                 await notifications.notify_admin_event(
                     bot,

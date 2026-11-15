@@ -71,8 +71,8 @@ async def phone_contact(
     message: Message, user: dict, lang: str, state: FSMContext, bot: Bot
 ) -> None:
     if (
-        message.contact.user_id is not None
-        and message.contact.user_id != message.from_user.id
+        message.contact.user_id is None
+        or message.contact.user_id != message.from_user.id
     ):
         await message.answer(t(lang, "seller.phone_not_owned"))
         return
@@ -94,7 +94,7 @@ async def phone_contact(
     await notifications.notify_admin_event(
         bot,
         "new_seller",
-        name=esc(updated["full_name"]) or "—",
+        name=updated["full_name"] or "—",
         tg_id=updated["tg_id"],
         code=updated["seller_code"] or "—",
     )
@@ -123,7 +123,6 @@ async def add_start(
     await state.update_data(
         title="",
         description="",
-        photo_id=None,
         extra_info="",
         login="",
         password="",
@@ -159,27 +158,6 @@ async def add_description(message: Message, lang: str, state: FSMContext) -> Non
         await message.answer(t(lang, "seller.invalid_desc"))
         return
     await state.update_data(description=text)
-    await state.set_state(SellerFlow.photo)
-    await message.answer(
-        t(lang, "seller.add_photo_prompt"),
-        reply_markup=cancel_reply(lang),
-    )
-
-
-@router.message(StateFilter(SellerFlow.photo))
-async def add_photo(message: Message, lang: str, state: FSMContext) -> None:
-    text = (message.text or "").strip()
-    is_skip = text in ("-",) or any(
-        text == t(lang_, "common.none") for lang_ in ("uz", "ru", "en")
-    )
-    if message.photo:
-        photo_id = message.photo[-1].file_id
-    elif is_skip:
-        photo_id = None
-    else:
-        await message.answer(t(lang, "seller.photo_invalid"))
-        return
-    await state.update_data(photo_id=photo_id)
     await state.set_state(SellerFlow.extra_info)
     await message.answer(
         t(lang, "seller.add_extra_prompt"),
@@ -263,7 +241,6 @@ async def ownership_yes(
         "seller.add_confirm_title",
         title=esc(data.get("title", "")),
         description=esc(data.get("description", "")) or t(lang, "seller.no_description"),
-        photo="✅" if data.get("photo_id") else "—",
         extra=esc(data.get("extra_info", "")) or "—",
         login=esc(data.get("login", "")),
         price=fmt_sum(int(data.get("price", 0))),
@@ -289,7 +266,6 @@ async def add_confirm(
             data.get("password", ""),
             int(data.get("price", 0)),
             "real",
-            photo_id=data.get("photo_id"),
             extra_info=data.get("extra_info", ""),
             verification_status="verified",
         )
@@ -309,7 +285,7 @@ async def add_confirm(
         bot,
         "new_listing",
         id=display_id,
-        title=esc(data.get("title", "")),
+        title=data.get("title", ""),
         price=fmt_sum(int(data.get("price", 0))),
     )
 

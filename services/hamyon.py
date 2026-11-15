@@ -41,7 +41,7 @@ from config import (
 )
 from services import notifications, payment
 from services.errors import ServiceError
-from utils import fmt_dt, fmt_sum
+from utils import esc, fmt_dt, fmt_sum
 
 logger = logging.getLogger(__name__)
 
@@ -96,14 +96,22 @@ async def _request(
         body = json.loads(text)
     except json.JSONDecodeError:
         logger.error(
-            "HamyonAPI noto'g'ri javob (%s %s, HTTP %s): %s", method, path, status, text
+            "HamyonAPI noto'g'ri javob (%s %s, HTTP %s): %s",
+            method,
+            path,
+            status,
+            text[:200],
         )
         raise ServiceError(
             "To'lov serveridan javob olinmadi. Keyinroq urinib ko'ring."
         ) from None
     if not isinstance(body, dict):
         logger.error(
-            "HamyonAPI noto'g'ri javob (%s %s, HTTP %s): %s", method, path, status, text
+            "HamyonAPI noto'g'ri javob (%s %s, HTTP %s): %s",
+            method,
+            path,
+            status,
+            text[:200],
         )
         raise ServiceError(
             "To'lov serveridan javob olinmadi. Keyinroq urinib ko'ring."
@@ -119,8 +127,13 @@ def _extract_card(payload: dict) -> str:
     return ""
 
 
-async def create_payment(order_id: int, amount: int) -> dict:
-    """Create a HamyonAPI payment. Returns ``{"payment_id": ..., "card": ...}``."""
+async def create_payment(order_ref: str | int, amount: int) -> dict:
+    """Create a HamyonAPI payment. Returns ``{"payment_id": ..., "card": ...}``.
+
+    ``order_ref`` is namespaced (``o<order_id>`` / ``t<topup_id>``) so a
+    top-up callback can never be mistaken for an escrow order with the same
+    numeric id.
+    """
     body = await _request(
         "POST",
         "/payment/create",
@@ -128,7 +141,7 @@ async def create_payment(order_id: int, amount: int) -> dict:
             "shop_id": HAMYON_SHOP_ID,
             "shop_key": HAMYON_SHOP_KEY,
             "amount": int(amount),
-            "order_id": str(order_id),
+            "order_id": str(order_ref)[:64],
         },
     )
     if body.get("error") or not body.get("payment_id"):
@@ -201,13 +214,6 @@ def _amount_matches(raw: object, amount: int) -> bool:
     return value == Decimal(amount)
 
 
-def _as_int(raw: object) -> int | None:
-    try:
-        return int(str(raw).strip())
-    except (TypeError, ValueError):
-        return None
-
-
 async def handle_callback(data: dict[str, str]) -> dict:
     """Process a HamyonAPI prepare/complete callback.
 
@@ -220,139 +226,185 @@ async def handle_callback(data: dict[str, str]) -> dict:
         )
         return {"ok": False}
     shop_id = (data.get("shop_id") or "").strip()
-    if shop_id and shop_id != HAMYON_SHOP_ID:
+    if not shop_id or shop_id != HAMYON_SHOP_ID:
         logger.warning("Hamyon callback noto'g'ri shop_id: %s", shop_id)
         return {"ok": False}
     if not verify_signature(data):
-        logger.warning("Hamyon callback imzosi noto'g'ri: %s", data)
+        logger.warning(
+            "Hamyon callback imzosi noto'g'ri (payment_id=%s, order_id=%s)",
+            data.get("payment_id"),
+            data.get("order_id"),
+        )
         return {"ok": False}
 
     payment_id = str(data.get("payment_id", "")).strip()
     status = str(data.get("status", "")).strip().lower()
-    order_id = _as_int(data.get("order_id"))
+    order_ref_raw = str(data.get("order_id", "")).strip()
+    order_ref = order_ref_raw or None
     reason = str(data.get("reason", "")).strip()
 
     if not payment_id:
         return {"ok": False}
 
     if status == "paid":
-        await _handle_paid(payment_id, order_id, data)
+        await _handle_paid(payment_id, order_ref, data)
         return {"ok": True}
     if status == "cancel":
-        await _handle_cancel(payment_id, order_id, reason)
+        await _handle_cancel(payment_id, order_ref, reason)
         return {"ok": True}
     if status in ("prepare", "pending", "created"):
-        logger.info("Hamyon prepare: payment_id=%s order_id=%s", payment_id, order_id)
+        logger.info("Hamyon prepare: payment_id=%s order_id=%s", payment_id, order_ref)
         return {"ok": True}
     logger.warning("Hamyon callback noma'lum status: %s (payment_id=%s)", status, payment_id)
     return {"ok": True}
 
 
-async def _handle_paid(payment_id: str, order_id: int | None, data: dict[str, str]) -> None:
-    # 1. Check if this is an escrow account order (any status: late payments matter)
+async def _resolve_target(
+    payment_id: str, order_id: str | None
+) -> tuple[str | None, dict | None]:
+    """Resolve a callback to a top-up or order without id-namespace collisions.
+
+    Provider callbacks are matched by ``payment_id`` first. New payments use
+    namespaced refs (``o<id>``/``t<id>``); legacy numeric refs are accepted only
+    when the stored payment_id also matches.
+    """
     from database.db import db
-    from services import marketplace
-    order = None
+
     if payment_id:
+        topup = await payment.get_hamyon_topup(payment_id=payment_id)
+        if topup is not None:
+            return "topup", topup
         order = await db.fetchone(
-            "SELECT * FROM orders WHERE payment_id = ?",
-            (payment_id,),
+            "SELECT * FROM orders WHERE payment_id = ?", (payment_id,)
         )
-    if order is None and order_id is not None:
-        order = await db.fetchone(
-            "SELECT * FROM orders WHERE id = ?",
-            (order_id,),
+        if order is not None:
+            return "order", order
+
+    if order_id is None:
+        return None, None
+    ref = str(order_id).strip()
+    if ref.startswith("t") and ref[1:].isdigit():
+        topup = await payment.get_hamyon_topup(
+            payment_id=payment_id, order_id=ref[1:]
         )
+        return ("topup", topup) if topup is not None else (None, None)
+    if ref.startswith("o") and ref[1:].isdigit():
+        order = await db.fetchone("SELECT * FROM orders WHERE id = ?", (int(ref[1:]),))
+        if order is None:
+            return None, None
+        stored = str(order.get("payment_id") or "").strip()
+        if stored and payment_id and stored != payment_id:
+            return None, None
+        return "order", order
+    if ref.isdigit():
+        # Legacy callbacks used bare numeric ids. Resolve orders first (the
+        # original behaviour) so a top-up row that happens to share the same
+        # numeric id cannot steal an escrow payment.
+        order = await db.fetchone("SELECT * FROM orders WHERE id = ?", (int(ref),))
+        if order is not None:
+            stored = str(order.get("payment_id") or "").strip()
+            if not stored or not payment_id or stored == payment_id:
+                return "order", order
+        topup = await payment.get_hamyon_topup(payment_id=payment_id, order_id=ref)
+        return ("topup", topup) if topup is not None else (None, None)
+    return None, None
 
-    if order is not None:
-        expected = int(order.get("payment_amount") or order["price"])
-        if not _amount_matches(data.get("amount"), expected):
-            logger.error(
-                "Hamyon paid (Order): summa mos emas (order=%s, expected=%s, got=%s)",
-                order["id"],
-                expected,
-                data.get("amount"),
-            )
-            return
-        if order["status"] == "cancelled":
-            late = await marketplace.handle_late_order_payment(order["id"], payment_id)
-            await _notify_late_payment(late)
-            logger.info(
-                "Hamyon paid (late): order=%s payment_id=%s action=%s",
-                order["id"],
-                payment_id,
-                late.get("action") if late else None,
-            )
-            return
-        if order["status"] != "pending_payment":
-            logger.info(
-                "Hamyon paid (Order): allaqachon qayta ishlangan "
-                "(order=%s status=%s payment_id=%s)",
-                order["id"],
-                order["status"],
-                payment_id,
-            )
-            return
-        info = await marketplace.confirm_escrow_payment(order["id"], payment_id)
-        if _bot is not None and info.get("buyer") and info.get("account"):
-            from config import CHECK_MINUTES, PENALTY_INTERVAL_MINUTES, PENALTY_PERCENT
-            login, pwd, _extra = await marketplace.get_credentials(order["id"], order["buyer_id"])
-            await notifications.notify(
-                _bot,
-                info["buyer"]["tg_id"],
-                info["buyer"]["lang"],
-                "shop.purchased",
-                title=info["account"]["title"],
-                login=login,
-                password=pwd,
-                price=fmt_sum(order["price"]),
-                deadline=fmt_dt(info["order"]["check_deadline"]),
-                minutes=CHECK_MINUTES,
-                interval=PENALTY_INTERVAL_MINUTES,
-                penalty=PENALTY_PERCENT,
-            )
-            await notifications.notify(
-                _bot,
-                info["seller"]["tg_id"],
-                info["seller"]["lang"],
-                "notify.seller_sold",
-                title=info["account"]["title"],
-                price=fmt_sum(order["price"]),
-                order=order["id"],
-                share=SELLER_SHARE_PERCENT,
-            )
-            await notifications.notify_admin_event(
-                _bot,
-                "payment_confirmed",
-                order_id=order["id"],
-                amount=fmt_sum(order["price"]),
-            )
-        logger.info("Hamyon paid (Order): order=%s payment_id=%s", order["id"], payment_id)
-        return
 
-    # 2. Check if this is a wallet topup
-    topup = await payment.get_hamyon_topup(payment_id=payment_id, order_id=order_id)
-    if topup is None:
+async def _handle_paid(payment_id: str, order_id: str | None, data: dict[str, str]) -> None:
+    from services import marketplace
+
+    kind, target = await _resolve_target(payment_id, order_id)
+    if target is None:
         logger.warning(
             "Hamyon paid: to'lov topilmadi (payment_id=%s order_id=%s)",
             payment_id,
             order_id,
         )
         return
-    if not _amount_matches(data.get("amount"), int(topup["amount"])):
+
+    if kind == "topup":
+        if not _amount_matches(data.get("amount"), int(target["amount"])):
+            logger.error(
+                "Hamyon paid: summa mos emas (topup=%s, expected=%s, got=%s)",
+                target["id"],
+                target["amount"],
+                data.get("amount"),
+            )
+            return
+        info = await payment.complete_hamyon_topup(int(target["id"]), payment_id)
+        if info is None:
+            return
+        if not info.get("already"):
+            await _notify_paid(info)
+        logger.info("Hamyon paid: topup=%s payment_id=%s", target["id"], payment_id)
+        return
+
+    order = target
+    expected = int(order.get("payment_amount") or order["price"])
+    if not _amount_matches(data.get("amount"), expected):
         logger.error(
-            "Hamyon paid: summa mos emas (topup=%s, expected=%s, got=%s)",
-            topup["id"],
-            topup["amount"],
+            "Hamyon paid (Order): summa mos emas (order=%s, expected=%s, got=%s)",
+            order["id"],
+            expected,
             data.get("amount"),
         )
         return
-    info = await payment.complete_hamyon_topup(int(topup["id"]), payment_id)
-    if info is None:
+    if order["status"] == "cancelled":
+        late = await marketplace.handle_late_order_payment(
+            order["id"], payment_id, amount=expected
+        )
+        await _notify_late_payment(late)
+        logger.info(
+            "Hamyon paid (late): order=%s payment_id=%s action=%s",
+            order["id"],
+            payment_id,
+            late.get("action") if late else None,
+        )
         return
-    if not info.get("already"):
-        await _notify_paid(info)
-    logger.info("Hamyon paid: topup=%s payment_id=%s", topup["id"], payment_id)
+    if order["status"] != "pending_payment":
+        logger.info(
+            "Hamyon paid (Order): allaqachon qayta ishlangan "
+            "(order=%s status=%s payment_id=%s)",
+            order["id"],
+            order["status"],
+            payment_id,
+        )
+        return
+    info = await marketplace.confirm_escrow_payment(order["id"], payment_id)
+    if _bot is not None and info.get("buyer") and info.get("account"):
+        from config import CHECK_MINUTES, PENALTY_INTERVAL_MINUTES, PENALTY_PERCENT
+        login, pwd, _extra = await marketplace.get_credentials(order["id"], order["buyer_id"])
+        await notifications.notify(
+            _bot,
+            info["buyer"]["tg_id"],
+            info["buyer"]["lang"],
+            "shop.purchased",
+            title=esc(info["account"]["title"]),
+            login=esc(login),
+            password=esc(pwd),
+            price=fmt_sum(order["price"]),
+            deadline=fmt_dt(info["order"]["check_deadline"]),
+            minutes=CHECK_MINUTES,
+            interval=PENALTY_INTERVAL_MINUTES,
+            penalty=PENALTY_PERCENT,
+        )
+        await notifications.notify(
+            _bot,
+            info["seller"]["tg_id"],
+            info["seller"]["lang"],
+            "notify.seller_sold",
+            title=esc(info["account"]["title"]),
+            price=fmt_sum(order["price"]),
+            order=order["id"],
+            share=SELLER_SHARE_PERCENT,
+        )
+        await notifications.notify_admin_event(
+            _bot,
+            "payment_confirmed",
+            order_id=order["id"],
+            amount=fmt_sum(order["price"]),
+        )
+    logger.info("Hamyon paid (Order): order=%s payment_id=%s", order["id"], payment_id)
 
 
 async def _notify_late_payment(late: dict | None) -> None:
@@ -378,9 +430,9 @@ async def _notify_late_payment(late: dict | None) -> None:
             buyer.get("tg_id"),
             buyer.get("lang"),
             "shop.purchased",
-            title=account.get("title", ""),
-            login=login,
-            password=pwd,
+            title=esc(account.get("title", "")),
+            login=esc(login),
+            password=esc(pwd),
             price=fmt_sum(order.get("price", 0)),
             deadline=fmt_dt(order.get("check_deadline")),
             minutes=CHECK_MINUTES,
@@ -393,7 +445,7 @@ async def _notify_late_payment(late: dict | None) -> None:
                 seller["tg_id"],
                 seller.get("lang"),
                 "notify.seller_sold",
-                title=account.get("title", ""),
+                title=esc(account.get("title", "")),
                 price=fmt_sum(order.get("price", 0)),
                 order=order.get("id"),
                 share=SELLER_SHARE_PERCENT,
@@ -422,21 +474,21 @@ async def _notify_late_payment(late: dict | None) -> None:
         )
 
 
-async def _handle_cancel(payment_id: str, order_id: int | None, reason: str) -> None:
-    from database.db import db
+async def _handle_cancel(payment_id: str, order_id: str | None, reason: str) -> None:
     from services import marketplace
-    order = None
-    if order_id is not None:
-        order = await db.fetchone(
-            "SELECT * FROM orders WHERE id = ? AND status = 'pending_payment'",
-            (order_id,),
+
+    kind, target = await _resolve_target(payment_id, order_id)
+    if target is None:
+        logger.info(
+            "Hamyon cancel: to'lov topilmadi (payment_id=%s order_id=%s)",
+            payment_id,
+            order_id,
         )
-    if order is None and payment_id:
-        order = await db.fetchone(
-            "SELECT * FROM orders WHERE payment_id = ? AND status = 'pending_payment'",
-            (payment_id,),
-        )
-    if order is not None:
+        return
+    if kind == "order":
+        order = target
+        if order["status"] != "pending_payment":
+            return
         cancelled = await marketplace.cancel_expired_order(order["id"])
         if _bot is not None and cancelled and cancelled.get("buyer"):
             await notifications.notify(
@@ -451,16 +503,16 @@ async def _handle_cancel(payment_id: str, order_id: int | None, reason: str) -> 
                 "order_cancelled",
                 order_id=order["id"],
             )
-        logger.info("Hamyon cancel (Order): order=%s payment_id=%s", order["id"], payment_id)
+        logger.info(
+            "Hamyon cancel (Order): order=%s payment_id=%s reason=%s",
+            order["id"],
+            payment_id,
+            reason[:100],
+        )
         return
 
-    topup = await payment.get_hamyon_topup(payment_id=payment_id, order_id=order_id)
-    if topup is None:
-        logger.info(
-            "Hamyon cancel: to'lov topilmadi (payment_id=%s order_id=%s)",
-            payment_id,
-            order_id,
-        )
+    topup = target
+    if topup["status"] != "pending":
         return
     await payment.cancel_hamyon_topup(int(topup["id"]), payment_id)
     if _bot is not None:
@@ -471,7 +523,10 @@ async def _handle_cancel(payment_id: str, order_id: int | None, reason: str) -> 
             "wallet.hamyon_canceled",
         )
     logger.info(
-        "Hamyon cancel: topup=%s payment_id=%s reason=%s", topup["id"], payment_id, reason
+        "Hamyon cancel: topup=%s payment_id=%s reason=%s",
+        topup["id"],
+        payment_id,
+        reason[:100],
     )
 
 

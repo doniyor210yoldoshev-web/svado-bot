@@ -8,8 +8,11 @@ admin panel. Multi-language: **O'zbekcha / Русский / English**.
 - **Marketplace**: akkauntlar ro'yxati, sahifalash, qidiruv (akkaunt ID yoki sotuvchi kodi).
 - **Escrow**: xaridor to'lovi vaqtincha ushlab turiladi, tasdiqlangach sotuvchiga o'tadi.
 - **Komissiya**: default 7% (`COMMISSION_PERCENT`), sotuvchiga 93%.
-- **Himoya**: 5 daqiqalik to'lov oynasi, tekshirish muddati (`CHECK_MINUTES`), kechikish jarimasi, avtomatik yakunlash.
-- **Nizolar**: xaridor nizo ochadi, sotuvchi HA/YO'Q javob beradi, tizim avtomatik hal qiladi (admin aralashmaydi).
+- **Himoya**: 5 daqiqalik to'lov oynasi, parol olingach 5 daqiqalik tekshirish
+  oynasi, har daqiqada 7% kechikish jarimasi va ogohlantirish, avtomatik yakunlash.
+- **Nizolar**: xaridor tekshirish oynasida nizo ochadi, sotuvchi HA/YO'Q javob
+  beradi, tizim avtomatik hal qiladi (admin aralashmaydi). Skrinshot/dalil talab
+  qilinmaydi; takroran qoidabuzar tomonlar tarixi hisobga olinadi.
 - **Hamyon**: balans to'ldirish (karta + chek), yechib olish so'rovlari, tarix.
 - **Test rejimi**: admin istalgan foydalanuvchini test rejimiga o'tkazadi; test balansi va
   test akkauntlari real balansga ta'sir qilmaydi.
@@ -38,7 +41,9 @@ python main.py
 ```
 
 Birinchi ishga tushirishda `data/` papkasi va SQLite bazasi avtomatik yaratiladi.
-`FERNET_KEY` bo'sh bo'lsa `data/fernet.key` avtomatik generatsiya qilinadi.
+Lokal rejimda `FERNET_KEY` bo'sh bo'lsa `data/fernet.key` avtomatik generatsiya
+qilinadi. Productionda (Render yoki PostgreSQL) `FERNET_KEY` majburiy: ephemeral
+fayl tizimida kalit har deployda o'zgarsa, saqlangan login/parollar ochilmay qoladi.
 
 ## Muhim environment o'zgaruvchilari
 
@@ -49,14 +54,14 @@ Birinchi ishga tushirishda `data/` papkasi va SQLite bazasi avtomatik yaratiladi
 | `DATABASE_URL` | PostgreSQL URL; bo'sh bo'lsa SQLite | `""` |
 | `DB_PATH` | SQLite fayl yo'li | `data/market.db` |
 | `FSM_DB_PATH` | FSM SQLite fayli | `data/fsm.db` |
-| `FERNET_KEY` | Login/parol shifrlash kaliti | avtomatik |
+| `FERNET_KEY` | Login/parol shifrlash kaliti (productionda majburiy) | lokal avtomatik |
 | `PAYMENT_CARD` / `PAYMENT_HOLDER` | To'lov kartasi ma'lumotlari | — |
 | `HAMYON_API_URL` / `HAMYON_SHOP_ID` / `HAMYON_SHOP_KEY` | HamyonAPI sozlamalari (@HamyonAPIBot dan) | `https://hamyon-api.uz` / — |
 | `SUPPORT_USERNAME` | Yordam uchun username (@siz) | `""` |
 | `DEFAULT_LANG` | `uz`, `ru`, `en` | `uz` |
 | `COMMISSION_PERCENT` | Komissiya foizi | `7` |
-| `CHECK_MINUTES` | Tekshirish muddati | `10` |
-| `PENALTY_PERCENT` / `PENALTY_INTERVAL_MINUTES` | Jarima foizi va intervali | `10` / `10` |
+| `CHECK_MINUTES` | Tekshirish muddati (parol olingach) | `5` |
+| `PENALTY_PERCENT` / `PENALTY_INTERVAL_MINUTES` | Har daqiqadagi jarima foizi va intervali | `7` / `1` |
 | `AUTO_COMPLETE_MINUTES` | Avtomatik yakunlashgacha qo'shimcha vaqt | `60` |
 | `MIN_PRICE`, `MIN_TOPUP`, `MIN_WITHDRAW`, `MAX_TOPUP` | Limitlar (so'm) | `1000`, `1000`, `5000`, `50000000` |
 | `PAGE_SIZE` | Sahifadagi akkauntlar soni | `10` |

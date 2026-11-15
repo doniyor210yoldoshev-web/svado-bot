@@ -40,8 +40,8 @@ _SCHEMA: list[str] = [
         active_disputes INTEGER NOT NULL DEFAULT 0,
         failed_disputes INTEGER NOT NULL DEFAULT 0,
         test_mode INTEGER NOT NULL DEFAULT 0,
-        balance BIGINT NOT NULL DEFAULT 0,
-        test_balance BIGINT NOT NULL DEFAULT 0,
+        balance BIGINT NOT NULL DEFAULT 0 CHECK(balance >= 0),
+        test_balance BIGINT NOT NULL DEFAULT 0 CHECK(test_balance >= 0),
         rating REAL NOT NULL DEFAULT 0,
         rating_count INTEGER NOT NULL DEFAULT 0,
         created_at TEXT NOT NULL,
@@ -74,8 +74,8 @@ _SCHEMA: list[str] = [
     """
     CREATE TABLE IF NOT EXISTS wallets (
         user_id BIGINT PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
-        balance BIGINT NOT NULL DEFAULT 0,
-        test_balance BIGINT NOT NULL DEFAULT 0,
+        balance BIGINT NOT NULL DEFAULT 0 CHECK(balance >= 0),
+        test_balance BIGINT NOT NULL DEFAULT 0 CHECK(test_balance >= 0),
         currency TEXT NOT NULL DEFAULT 'UZS',
         status TEXT NOT NULL DEFAULT 'active',
         created_at TEXT NOT NULL,
@@ -107,6 +107,7 @@ _SCHEMA: list[str] = [
         check_deadline TEXT NOT NULL,
         auto_complete_at TEXT NOT NULL,
         last_penalty_at TEXT,
+        last_reminder_minute INTEGER NOT NULL DEFAULT 0,
         reminder_5_sent INTEGER NOT NULL DEFAULT 0,
         reminder_1_sent INTEGER NOT NULL DEFAULT 0,
         created_at TEXT NOT NULL,
@@ -271,6 +272,7 @@ _SCHEMA: list[str] = [
         card_number TEXT NOT NULL,
         status TEXT NOT NULL DEFAULT 'pending',
         mode TEXT NOT NULL DEFAULT 'real',
+        seller_held BIGINT NOT NULL DEFAULT 0,
         created_at TEXT NOT NULL,
         reviewed_by BIGINT,
         reviewed_at TEXT,
@@ -331,6 +333,9 @@ _MIGRATIONS: dict[str, dict[str, str]] = {
         "cancel_requested_at": "TEXT",
         "seller_response": "TEXT",
         "seller_response_at": "TEXT",
+        "penalty_ticks": "INTEGER NOT NULL DEFAULT 0",
+        "last_penalty_at": "TEXT",
+        "last_reminder_minute": "INTEGER NOT NULL DEFAULT 0",
         "reminder_5_sent": "INTEGER NOT NULL DEFAULT 0",
         "reminder_1_sent": "INTEGER NOT NULL DEFAULT 0",
         "updated_at": "TEXT",
@@ -356,7 +361,11 @@ _MIGRATIONS: dict[str, dict[str, str]] = {
         "mode": "TEXT NOT NULL DEFAULT 'real'",
         "updated_at": "TEXT",
     },
-    "withdrawals": {"mode": "TEXT NOT NULL DEFAULT 'real'", "updated_at": "TEXT"},
+    "withdrawals": {
+        "mode": "TEXT NOT NULL DEFAULT 'real'",
+        "seller_held": "BIGINT NOT NULL DEFAULT 0",
+        "updated_at": "TEXT",
+    },
 }
 
 
@@ -368,15 +377,83 @@ def _render_schema(dialect: str) -> list[str]:
 
 
 def _pg_sql(sql: str) -> str:
-    """Translate ``?`` placeholders into PostgreSQL ``$1..$n`` placeholders."""
+    """Translate ``?`` placeholders into PostgreSQL ``$1..$n`` placeholders.
+
+    The translator intentionally skips quoted strings, quoted identifiers and
+    SQL comments so a literal ``?`` or a JSON operator can never be rewritten
+    into a placeholder by accident.
+    """
     out: list[str] = []
     index = 0
-    for char in sql:
-        if char == "?":
-            index += 1
-            out.append(f"${index}")
-        else:
+    i = 0
+    length = len(sql)
+    state: str | None = None
+    while i < length:
+        char = sql[i]
+        next_char = sql[i + 1] if i + 1 < length else ""
+
+        if state is None:
+            if char == "'":
+                state = "single"
+                out.append(char)
+            elif char == '"':
+                state = "double"
+                out.append(char)
+            elif char == "-" and next_char == "-":
+                state = "line_comment"
+                out.append(char)
+                out.append(next_char)
+                i += 1
+            elif char == "/" and next_char == "*":
+                state = "block_comment"
+                out.append(char)
+                out.append(next_char)
+                i += 1
+            elif char == "?":
+                index += 1
+                out.append(f"${index}")
+            else:
+                out.append(char)
+            i += 1
+            continue
+
+        if state == "single":
             out.append(char)
+            if char == "'":
+                if next_char == "'":
+                    out.append(next_char)
+                    i += 2
+                    continue
+                state = None
+            i += 1
+            continue
+
+        if state == "double":
+            out.append(char)
+            if char == '"':
+                if next_char == '"':
+                    out.append(next_char)
+                    i += 2
+                    continue
+                state = None
+            i += 1
+            continue
+
+        if state == "line_comment":
+            out.append(char)
+            if char == "\n":
+                state = None
+            i += 1
+            continue
+
+        # block_comment
+        out.append(char)
+        if char == "*" and next_char == "/":
+            out.append(next_char)
+            i += 2
+            state = None
+            continue
+        i += 1
     return "".join(out)
 
 
@@ -486,6 +563,53 @@ class Database:
             "CREATE UNIQUE INDEX IF NOT EXISTS idx_topups_public_id "
             "ON topups(public_id)"
         )
+        await self._run_ddl(
+            "CREATE INDEX IF NOT EXISTS idx_topups_hamyon_pending "
+            "ON topups(receipt_type, status, mode, amount)"
+        )
+        # HamyonAPI identifies an incoming transfer by its exact amount. This
+        # partial unique index is the cross-process safety net that prevents
+        # two open top-ups from reserving the same amount. Legacy databases may
+        # already contain duplicates; do not block startup on them.
+        try:
+            await self._run_ddl(
+                "CREATE UNIQUE INDEX IF NOT EXISTS idx_topups_hamyon_unique_pending "
+                "ON topups(amount) WHERE receipt_type = 'hamyon' "
+                "AND status = 'pending' AND mode = 'real'"
+            )
+        except Exception as exc:  # noqa: BLE001 - legacy duplicates are possible
+            logger.warning(
+                "Hamyon noyob summa indeksini yaratib bo'lmadi (eski dublikatlar): %s",
+                exc,
+            )
+        await self._run_ddl(
+            "CREATE INDEX IF NOT EXISTS idx_orders_payment_id ON orders(payment_id)"
+        )
+        # A provider payment id must never be bound to two different orders.
+        # Keep the failure non-fatal for legacy databases that already contain
+        # duplicates, but enforce the invariant on every clean database.
+        try:
+            await self._run_ddl(
+                "CREATE UNIQUE INDEX IF NOT EXISTS idx_orders_payment_id_unique "
+                "ON orders(payment_id) WHERE payment_id IS NOT NULL "
+                "AND payment_id <> ''"
+            )
+        except Exception as exc:  # noqa: BLE001 - legacy duplicates are possible
+            logger.warning(
+                "Buyurtma payment_id noyob indeksini yaratib bo'lmadi: %s", exc
+            )
+        # The same provider payment must resolve to exactly one Hamyon top-up,
+        # otherwise a callback could be replayed against an older request.
+        try:
+            await self._run_ddl(
+                "CREATE UNIQUE INDEX IF NOT EXISTS idx_topups_hamyon_payment_unique "
+                "ON topups(receipt_value) WHERE receipt_type = 'hamyon' "
+                "AND receipt_value <> ''"
+            )
+        except Exception as exc:  # noqa: BLE001 - legacy duplicates are possible
+            logger.warning(
+                "Hamyon payment_id noyob indeksini yaratib bo'lmadi: %s", exc
+            )
         await self._sync_wallets()
 
     async def _sync_wallets(self) -> None:
@@ -501,7 +625,11 @@ class Database:
             "(user_id, balance, test_balance, currency, status, created_at, updated_at) "
             "SELECT u.id, u.balance, u.test_balance, 'UZS', 'active', "
             "u.created_at, u.updated_at FROM users u "
-            "WHERE NOT EXISTS (SELECT 1 FROM wallets w WHERE w.user_id = u.id)"
+            "WHERE 1 = 1 "
+            "ON CONFLICT(user_id) DO UPDATE SET "
+            "balance = excluded.balance, "
+            "test_balance = excluded.test_balance, "
+            "updated_at = excluded.updated_at"
         )
         if self.is_postgres:
             await self._run_ddl(

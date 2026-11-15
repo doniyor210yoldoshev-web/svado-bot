@@ -37,7 +37,7 @@ from services import users as users_service
 from services.errors import InsufficientFunds, ServiceError
 from services.i18n import t
 from states import DisputeFlow
-from utils import esc, fmt_dt, fmt_sum
+from utils import esc, fmt_dt, fmt_sum, parse_dt, utcnow
 
 logger = logging.getLogger(__name__)
 
@@ -156,17 +156,18 @@ async def shop_confirm(
             await callback.answer(str(exc), show_alert=True)
             return
         try:
-            pay_amount = await payment.unique_hamyon_amount(
-                int(order["price"]), exclude_order_id=order["id"]
-            )
-            pay = await hamyon_service.create_payment(order["id"], pay_amount)
-            await marketplace.attach_escrow_payment(
-                order["id"],
-                user["id"],
-                pay["payment_id"],
-                pay_amount,
-                pay.get("card", ""),
-            )
+            async with payment.hamyon_amount_lock:
+                pay_amount = await payment.unique_hamyon_amount(
+                    int(order["price"]), exclude_order_id=order["id"]
+                )
+                pay = await hamyon_service.create_payment(f"o{order['id']}", pay_amount)
+                await marketplace.attach_escrow_payment(
+                    order["id"],
+                    user["id"],
+                    pay["payment_id"],
+                    pay_amount,
+                    pay.get("card", ""),
+                )
         except ServiceError as exc:
             await marketplace.cancel_expired_order(order["id"])
             await callback.answer(str(exc), show_alert=True)
@@ -486,6 +487,12 @@ async def order_dispute(
     if order["status"] != "checking":
         await callback.answer(t(lang, "order.cannot_dispute"), show_alert=True)
         return
+    deadline = parse_dt(order["check_deadline"])
+    if deadline is None or utcnow() > deadline:
+        await callback.answer(
+            t(lang, "order.dispute_late", minutes=CHECK_MINUTES), show_alert=True
+        )
+        return
     await state.set_state(DisputeFlow.reason)
     await state.update_data(order_id=order_id)
     if callback.message is not None:
@@ -498,7 +505,7 @@ async def order_dispute(
 
 @router.message(StateFilter(DisputeFlow.reason))
 async def dispute_reason(
-    message: Message, state: FSMContext, user: dict, lang: str
+    message: Message, state: FSMContext, user: dict, lang: str, bot: Bot
 ) -> None:
     reason = (message.text or "").strip()
     if not 3 <= len(reason) <= 1000:
@@ -510,54 +517,10 @@ async def dispute_reason(
         await state.clear()
         await message.answer(t(lang, "common.invalid_data"))
         return
-    await state.update_data(reason=reason)
-    await state.set_state(DisputeFlow.evidence)
-    await message.answer(
-        t(lang, "order.dispute_evidence_prompt"),
-        reply_markup=cancel_reply(lang),
-    )
-
-
-@router.message(StateFilter(DisputeFlow.evidence))
-async def dispute_evidence(
-    message: Message, state: FSMContext, user: dict, lang: str, bot: Bot
-) -> None:
-    data = await state.get_data()
-    order_id = data.get("order_id")
-    reason = data.get("reason", "")
-    if not isinstance(order_id, int) or not reason:
-        await state.clear()
-        await message.answer(t(lang, "common.invalid_data"))
-        return
-
-    text = (message.text or "").strip()
-    is_skip = text in ("-",) or any(
-        text == t(lang_, "common.none") for lang_ in ("uz", "ru", "en")
-    )
-    if message.photo:
-        evidence_type, evidence_content = "photo", message.photo[-1].file_id
-    elif message.document:
-        evidence_type, evidence_content = "document", message.document.file_id
-    elif is_skip:
-        evidence_type, evidence_content = "", ""
-    elif text:
-        if len(text) > 1000:
-            await message.answer(t(lang, "order.dispute_evidence_too_long"))
-            return
-        evidence_type, evidence_content = "text", text
-    else:
-        await message.answer(t(lang, "order.dispute_evidence_invalid"))
-        return
-
     try:
-        await marketplace.create_dispute(
-            order_id,
-            user["id"],
-            reason,
-            evidence_type=evidence_type or "text",
-            evidence_content=evidence_content,
-        )
+        await marketplace.create_dispute(order_id, user["id"], reason)
     except ServiceError as exc:
+        await state.clear()
         await message.answer(str(exc))
         return
     await state.clear()

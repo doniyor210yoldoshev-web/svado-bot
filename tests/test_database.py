@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-from database.db import db
+from database.db import _pg_sql, db
 from services import users
 
 
@@ -55,3 +55,14 @@ async def test_transaction_rolls_back_on_error(database) -> None:
         )
     fresh = await users.get_user(user["id"])
     assert fresh["balance"] == 500
+
+
+def test_pg_placeholders_skip_strings_identifiers_and_comments() -> None:
+    sql = (
+        "SELECT '?' AS literal, \"column?\" FROM t -- ?\n"
+        "WHERE a = ? /* ? */ AND b = ? AND c = 'it''s ?'"
+    )
+    assert _pg_sql(sql) == (
+        "SELECT '?' AS literal, \"column?\" FROM t -- ?\n"
+        "WHERE a = $1 /* ? */ AND b = $2 AND c = 'it''s ?'"
+    )
