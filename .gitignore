@@ -4,3 +4,5 @@ __pycache__/
 .env
 data/
 .ruff_cache/
+.pytest_cache/
+.vscode/
