@@ -1146,23 +1146,15 @@ async def request_order_cancellation(
     order_id: int,
     buyer_id: int,
     reason: str,
-    evidence_text: str = "",
-    evidence_type: str = "text",
-    evidence_content: str = "",
 ) -> dict:
     """Initiates purchase cancellation during the inspection window.
 
-    The optional evidence fields are kept for compatibility with the existing
-    dispute flow. They are length-limited and stored separately so they can
-    never expand the dispute reason or inject markup into admin messages.
+    No evidence/screenshots are requested: the decision is fully automated
+    and based on the order timeline plus buyer/seller dispute history.
     """
     reason = (reason or "").strip()
     if not 3 <= len(reason) <= 1000:
         raise ServiceError("Shikoyat sababi 3-1000 belgi bo'lishi kerak")
-    evidence_type = (evidence_type or "text").strip().lower()
-    if evidence_type not in ("text", "photo", "document"):
-        evidence_type = "text"
-    evidence_content = (evidence_content or evidence_text or "").strip()[:1000]
     now = utcnow_iso()
     async with db.transaction() as ex:
         order = await _lock_order(ex, order_id)
@@ -1186,18 +1178,11 @@ async def request_order_cancellation(
         )
         if claimed == 0:
             raise ServiceError("Buyurtma holati o'zgargan, shikoyat qabul qilinmadi")
-        dispute_id = await ex.insert(
+        await ex.insert(
             "INSERT INTO disputes (order_id, buyer_id, reason, status, created_at) "
             "VALUES (?, ?, ?, 'pending', ?)",
             (order_id, buyer_id, reason, now),
         )
-        if evidence_content:
-            await ex.insert(
-                "INSERT INTO dispute_evidence "
-                "(dispute_id, sender_id, evidence_type, content, created_at) "
-                "VALUES (?, ?, ?, ?, ?)",
-                (dispute_id, buyer_id, evidence_type, evidence_content, now),
-            )
         await ex.execute(
             "UPDATE users SET active_disputes = active_disputes + 1 WHERE id IN (?, ?)",
             (buyer_id, order["seller_id"]),
@@ -1508,20 +1493,8 @@ async def check_dispute_timeouts(bot=None) -> list[dict]:
     return resolved_events
 
 
-async def create_dispute(
-    order_id: int,
-    buyer_id: int,
-    reason: str,
-    evidence_type: str = "text",
-    evidence_content: str = "",
-) -> dict:
-    return await request_order_cancellation(
-        order_id,
-        buyer_id,
-        reason,
-        evidence_type=evidence_type,
-        evidence_content=evidence_content,
-    )
+async def create_dispute(order_id: int, buyer_id: int, reason: str) -> dict:
+    return await request_order_cancellation(order_id, buyer_id, reason)
 
 
 async def accrue_penalties() -> list[dict]:

@@ -211,19 +211,15 @@ async def test_seller_no_with_clean_history_refunds_and_pauses_account(database)
         )
 
 
-async def test_seller_no_with_evidence_refunds_buyer(database) -> None:
+async def test_dispute_without_evidence_refunds_buyer_and_pauses_account(
+    database,
+) -> None:
     seller, buyer, account_id = await _setup(database)
     order, _account, _seller_row = await marketplace.create_escrow_order(
         buyer["id"], account_id
     )
-    await marketplace.confirm_escrow_payment(order["id"], "pay-evidence")
-    await marketplace.create_dispute(
-        order["id"],
-        buyer["id"],
-        "Parol ishlamaydi",
-        evidence_type="text",
-        evidence_content="Telegram says the password is invalid.",
-    )
+    await marketplace.confirm_escrow_payment(order["id"], "pay-no-evidence")
+    await marketplace.create_dispute(order["id"], buyer["id"], "Parol ishlamaydi")
 
     result = await marketplace.handle_seller_dispute_response(
         order["id"], seller["id"], "YO_Q"
@@ -231,7 +227,27 @@ async def test_seller_no_with_evidence_refunds_buyer(database) -> None:
     assert result["action"] == "refund"
 
     fresh_order = await marketplace.get_order(order["id"])
+    fresh_account = await marketplace.get_account(account_id)
     assert fresh_order["status"] == "refunded"
+    assert fresh_account["status"] == "paused"
+
+
+async def test_dispute_is_rejected_after_inspection_window(database) -> None:
+    _seller, buyer, account_id = await _setup(database)
+    order, _account, _seller_row = await marketplace.create_escrow_order(
+        buyer["id"], account_id
+    )
+    await marketplace.confirm_escrow_payment(order["id"], "pay-late-dispute")
+    await db.execute(
+        "UPDATE orders SET check_deadline = ? WHERE id = ?",
+        ("2000-01-01T00:00:00", order["id"]),
+    )
+
+    with pytest.raises(ServiceError):
+        await marketplace.create_dispute(order["id"], buyer["id"], "Parol ishlamaydi")
+
+    fresh_order = await marketplace.get_order(order["id"])
+    assert fresh_order["status"] == "checking"
 
 
 async def test_late_payment_reactivates_cancelled_order(database) -> None:
@@ -342,7 +358,10 @@ async def test_penalty_is_capped_to_available_balance(database) -> None:
     assert int(fresh_order["penalty"]) == 500
 
 
-async def test_inspection_window_is_five_minutes_after_payment(database) -> None:
+async def test_inspection_window_is_five_minutes_after_payment(
+    database, monkeypatch
+) -> None:
+    monkeypatch.setattr(marketplace, "CHECK_MINUTES", 5)
     _seller, buyer, account_id = await _setup(database)
     order, _account, _seller_row = await marketplace.create_escrow_order(
         buyer["id"], account_id
@@ -353,7 +372,11 @@ async def test_inspection_window_is_five_minutes_after_payment(database) -> None
     assert 295 <= delta.total_seconds() <= 305
 
 
-async def test_penalty_is_seven_percent_per_minute_after_deadline(database) -> None:
+async def test_penalty_is_seven_percent_per_minute_after_deadline(
+    database, monkeypatch
+) -> None:
+    monkeypatch.setattr(marketplace, "PENALTY_PERCENT", 7)
+    monkeypatch.setattr(marketplace, "PENALTY_INTERVAL_MINUTES", 1)
     _seller, buyer, account_id = await _setup(database)
     order, _account, _seller_row = await marketplace.create_escrow_order(
         buyer["id"], account_id
